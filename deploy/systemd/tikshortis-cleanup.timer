@@ -1,0 +1,10 @@
+[Unit]
+Description=Clean up missing-file Tikshortis clips hourly
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

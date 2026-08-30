@@ -1,0 +1,18 @@
+[Unit]
+Description=Scan the Tikshortis library for duplicate clips
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Substitute the account that may talk to the docker socket on this host.
+# Left as-is the unit refuses to start, which is the intended failure.
+User=CHANGEME
+Group=CHANGEME
+# Groups byte-identical and perceptually identical clips into short_dupe_groups
+# for review under Settings -> Duplicates. Deletes nothing. The per-clip
+# fingerprint cache (carried over in the migration) makes every run after the
+# first cheap. Pairs dismissed in the UI are skipped.
+ExecStart=/usr/bin/docker exec tikshortis node scripts/scan-shorts-duplicates.mjs
+Nice=18
+IOSchedulingClass=idle

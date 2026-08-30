@@ -1,0 +1,10 @@
+[Unit]
+Description=Scan Tikshortis for duplicate clips nightly
+
+[Timer]
+OnCalendar=*-*-* 05:10:00
+RandomizedDelaySec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Sort dropped files in the Tikshortis import folder
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Substitute the account that may talk to the docker socket on this host.
+# Left as-is the unit refuses to start, which is the intended failure.
+User=CHANGEME
+Group=CHANGEME
+# Runs inside the container (shares the /shorts-store mount, better-sqlite3 and
+# ffmpeg). Files in main/_import are moved into profile folders; plain originals
+# come in 'pending' for the transcoder.
+ExecStart=/usr/bin/docker exec tikshortis node scripts/import-shorts.mjs
+Nice=18
+IOSchedulingClass=idle

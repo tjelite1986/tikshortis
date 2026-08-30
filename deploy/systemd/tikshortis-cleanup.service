@@ -1,0 +1,18 @@
+[Unit]
+Description=Remove Tikshortis clips whose file is gone + empty playlists
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Substitute the account that may talk to the docker socket on this host.
+# Left as-is the unit refuses to start, which is the intended failure.
+User=CHANGEME
+Group=CHANGEME
+# Runs the in-app maintenance route inside the container, so it reuses the same
+# path resolution and DB logic as the Settings buttons and cannot drift from
+# them. The credential comes from the container's own env rather than being
+# duplicated here.
+ExecStart=/usr/bin/docker exec tikshortis sh -c 'curl -fsS -X POST "http://127.0.0.1:3000/api/shorts/maintenance?action=all" -H "x-admin-token: $ADMIN_TOKEN"'
+Nice=18
+IOSchedulingClass=idle

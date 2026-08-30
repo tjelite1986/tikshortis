@@ -1,0 +1,23 @@
+import { notFound, redirect } from "next/navigation";
+import { getSession } from "@/lib/auth";
+import { getProfileSummary } from "@/lib/shorts";
+import ShortsCandidates from "@/components/shorts-candidates";
+
+export const dynamic = "force-dynamic";
+
+// Admin-only manual download browser for one profile.
+export default async function ProfileCandidatesPage(
+  props: {
+    params: Promise<{ id: string }>;
+  }
+) {
+  const params = await props.params;
+  const session = await getSession();
+  if (!session) redirect("/login");
+  if (session.role !== "admin") redirect(`/profile/${params.id}`);
+
+  const profile = getProfileSummary(Number(params.id));
+  if (!profile) notFound();
+
+  return <ShortsCandidates profileId={profile.id} profileName={profile.name} />;
+}

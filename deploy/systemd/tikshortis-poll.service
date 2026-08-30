@@ -1,0 +1,19 @@
+[Unit]
+Description=Poll Tikshortis auto-poll profiles for new clips
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Substitute the account that may talk to the docker socket on this host.
+# Left as-is the unit refuses to start, which is the intended failure.
+User=CHANGEME
+Group=CHANGEME
+# Runs inside the container (shares the bind-mounted yt-dlp, ffmpeg,
+# better-sqlite3 and /shorts-store). Downloads land as 'pending' clips for the
+# transcoder. This job REPLACED elitev2-shorts-poll, which is disabled: both
+# polling the same profiles would have downloaded every new clip twice, once
+# into each database, with two copies on disk.
+ExecStart=/usr/bin/docker exec tikshortis node scripts/poll-shorts.mjs
+Nice=18
+IOSchedulingClass=idle

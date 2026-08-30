@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 0 0% 3.9%;
+  --foreground: 0 0% 98%;
+  /* Accent + app background. Both names are shared with elite-v2 on purpose:
+     when a signed-in account has picked colours there, the layout writes those
+     two values here and the app wears them (see lib/sso.ts). Signed out, or
+     with nothing to adopt, these are what shows. */
+  --accent: #f43f5e;
+  --app-bg: radial-gradient(circle at 50% -10%, #241a20 0%, #121212 60%);
+}
+
+/* Remap the accent utilities the ported components use to the live accent, so a
+   single stored hex themes the whole app. The defaults below are the app's own
+   rose, so the untouched look is the intended one rather than an accident. */
+.bg-rose-500,
+.bg-rose-600 {
+  background-color: var(--accent) !important;
+}
+.hover\:bg-rose-500:hover,
+.hover\:bg-rose-600:hover {
+  background-color: color-mix(in srgb, var(--accent), white 14%) !important;
+}
+.text-rose-400,
+.text-rose-500 {
+  color: var(--accent) !important;
+}
+.text-rose-300 {
+  color: color-mix(in srgb, var(--accent), white 42%) !important;
+}
+.ring-rose-400,
+.focus\:ring-rose-500:focus {
+  --tw-ring-color: var(--accent) !important;
+}
+.accent-rose-500 {
+  accent-color: var(--accent) !important;
+}
+
+@layer base {
+  * {
+    border-color: hsl(0 0% 20%);
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+}
+
+@keyframes menuFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Immersive mode ("Hide UI"): hide the app chrome for a true fullscreen. Set by
+   shorts-feed.tsx; long-pressing a clip clears it. */
+body.shorts-immersive [data-immersive-hide] {
+  display: none !important;
+}

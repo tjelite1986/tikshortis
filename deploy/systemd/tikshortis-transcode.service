@@ -1,0 +1,16 @@
+[Unit]
+Description=Transcode Tikshortis clips to web-optimized .web.mp4
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Substitute the account that may talk to the docker socket on this host.
+# Left as-is the unit refuses to start, which is the intended failure.
+User=CHANGEME
+Group=CHANGEME
+# Runs inside the container so it shares its ffmpeg, better-sqlite3 and the
+# /shorts-store mount. The script is idempotent and locks against overlap.
+ExecStart=/usr/bin/docker exec tikshortis node scripts/transcode-shorts.mjs
+Nice=15
+IOSchedulingClass=idle
