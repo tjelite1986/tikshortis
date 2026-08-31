@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { qb, getOne } from "@/lib/kysely";
 import { canAccessChannel, parseChannel } from "@/lib/shorts";
 import {
   storeShortUpload,
-  userHomeDir,
   profileFromFilename,
   renameShortFiles,
 } from "@/lib/shorts-storage";
@@ -43,11 +41,8 @@ export async function POST(request: Request) {
   }
 
   try {
-    // Each user's clips live under their own home dir
-    // (<PROFILE_ROOT>/u_<user>/shorts/<channel>/), with a readable filename.
-    const me = getOne<{ username: string | null }>(
-      qb.selectFrom("users").select("username").where("id", "=", userId)
-    );
+    // Clips live in the channel's own store (<SHORTS_ROOT>/<channel>/), with a
+    // readable filename.
     const buffer = Buffer.from(await file.arrayBuffer());
     // A "profilname_-_title.mp4" filename lands in that creator's subfolder;
     // anything else falls back to a shared folder inside storeShortUpload, so a
@@ -55,7 +50,6 @@ export async function POST(request: Request) {
     const subdir = profileFromFilename(file.name) ?? undefined;
     const stored = await storeShortUpload(
       channel,
-      userHomeDir(userId, me?.username),
       caption,
       file.name,
       file.type,

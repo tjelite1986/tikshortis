@@ -177,19 +177,22 @@ function readableBase(filename: string, caption: string | null): string {
   return sanitizeSegment(stem) || sanitizeSegment(caption) || "clip";
 }
 
-// Persist an uploaded short into the uploader's per-user home:
-// <PROFILE_ROOT>/<userHome>/shorts/<channel>/<readableName>. Probes it for
+// Persist an uploaded short into the channel's own store:
+// <SHORTS_ROOT>/<channel>/<subdir>/<readableName>. Probes it for
 // dimensions/duration and extracts a poster. Throws if the file isn't a
-// supported video so the caller can reject the upload. `userHome` is the value
-// from userHomeDir() (e.g. "u_anna"); the stored filename is the ORIGINAL
-// upload name (so a "profilname_-_title" name is preserved), with a short suffix
-// added only on a real name collision. The clip is ALWAYS placed in a subfolder
-// (<channel>/<subdir>/<file>): the given `subdir` (import collection / creator
-// parsed from the filename) or, when omitted, a shared fallback dir — never
-// loose in the channel root.
+// supported video so the caller can reject the upload. The stored filename is
+// the ORIGINAL upload name (so a "profilname_-_title" name is preserved), with
+// a short suffix added only on a real name collision. The clip is ALWAYS placed
+// in a subfolder (<channel>/<subdir>/<file>): the given `subdir` (import
+// collection / creator parsed from the filename) or, when omitted, a shared
+// fallback dir — never loose in the channel root.
+//
+// Uploads used to land in the uploader's per-user home under PROFILE_ROOT,
+// which is a mount shared with elite-v2. Everything else here (imports, polls)
+// already wrote to the channel store, so a single upload was enough to
+// re-create that shared tree; this keeps all of tikshortis' media in one place.
 export async function storeShortUpload(
   channel: ShortChannel,
-  userHome: string,
   caption: string | null,
   filename: string,
   mime: string,
@@ -208,14 +211,12 @@ export async function storeShortUpload(
   // shorts row that only fails later in the transcoder.
   assertRealVideo(source, filename);
 
-  // Per-user channel section: main -> "shorts", 18+ -> "shorts18".
-  const section = channel === "18plus" ? "shorts18" : "shorts";
-  // Mandatory subfolder — a clip is NEVER stored loose in the section root.
+  // Mandatory subfolder — a clip is NEVER stored loose in the channel root.
   // Either an explicit subdir (import collection / creator parsed from the
   // filename) or the shared fallback dir.
   const sub = profileSlug(subdir || UPLOADS_FALLBACK_DIR);
-  const rel = `${userHome}/${section}/${sub}`; // relative to PROFILE_ROOT
-  const dir = path.join(PROFILE_ROOT, rel);
+  const root = channelDir(channel);
+  const dir = path.join(root, sub);
   ensureDir(dir);
 
   const [, ext] = splitExt(filename); // ext includes the dot (".mp4"/".web.mp4")
@@ -225,10 +226,10 @@ export async function storeShortUpload(
   const base = fs.existsSync(path.join(dir, `${wanted}${ext}`))
     ? `${wanted}_${randomUUID().slice(0, 8)}`
     : wanted;
-  // Self-describing upload key → videoPathFor()/posterPathFor() resolve it under
-  // PROFILE_ROOT automatically.
-  const storageKey = `${rel}/${base}${ext}`;
-  const videoPath = path.join(PROFILE_ROOT, storageKey);
+  // A plain <subdir>/<file> key → videoPathFor()/posterPathFor() resolve it
+  // under SHORTS_ROOT/<channel> automatically.
+  const storageKey = `${sub}/${base}${ext}`;
+  const videoPath = path.join(root, storageKey);
   if (typeof source === "string") fs.copyFileSync(source, videoPath);
   else fs.writeFileSync(videoPath, source);
 
@@ -239,11 +240,11 @@ export async function storeShortUpload(
   let posterKey: string | null = null;
   try {
     const posterBuf = extractVideoPoster(videoPath);
-    posterKey = `${rel}/${base}.jpg`;
+    posterKey = `${sub}/${base}.jpg`;
     await sharp(posterBuf)
       .resize(POSTER_MAX, POSTER_MAX, { fit: "inside", withoutEnlargement: true })
       .jpeg({ quality: 78 })
-      .toFile(path.join(PROFILE_ROOT, posterKey));
+      .toFile(path.join(root, posterKey));
   } catch {
     posterKey = null;
   }
