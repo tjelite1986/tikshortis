@@ -4,15 +4,22 @@ import { getSession, handleFor } from "@/lib/auth";
 import { loginUrl, ssoConfigured } from "@/lib/sso";
 import BottomNav from "@/components/bottom-nav";
 import SignedOut from "@/components/signed-out";
+import PwaRegister from "@/components/pwa-register";
+import InstallBanner from "@/components/install-banner";
 
 export const metadata: Metadata = {
   title: "Tikshortis",
   description: "A vertical short-video library.",
+  manifest: "/manifest.webmanifest",
   applicationName: "Tikshortis",
   appleWebApp: {
     capable: true,
     title: "Tikshortis",
     statusBarStyle: "black-translucent",
+  },
+  icons: {
+    icon: "/favicon-32.png?v=1",
+    apple: "/apple-touch-icon.png?v=1",
   },
 };
 
@@ -62,6 +69,7 @@ export default async function RootLayout({
               eliteUrl={eliteUrl}
             >
               {children}
+              <InstallBanner />
             </BottomNav>
           ) : (
             // Not a redirect. The sign-in page belongs to another host, and a
@@ -74,6 +82,7 @@ export default async function RootLayout({
             />
           )}
         </div>
+        <PwaRegister />
       </body>
     </html>
   );
