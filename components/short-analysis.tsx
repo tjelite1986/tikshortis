@@ -67,7 +67,7 @@ export default function ShortAnalysis({
             className="flex gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3"
           >
             <Link
-              href={`/?short=${short.id}`}
+              href={`/?focus=${short.id}`}
               className="relative aspect-[9/16] w-20 shrink-0 overflow-hidden rounded-lg bg-white/5"
             >
               {short.poster_key ? (

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { UploadCloud, X, Lock, Globe } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -25,8 +25,14 @@ export default function ShortsUpload({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Released whenever it changes and on unmount — otherwise the whole file
+  // stays referenced after the upload redirects away.
+  useEffect(() => {
+    if (!previewUrl) return;
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
+
   const pick = (f: File | null) => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
     setFile(f);
     setPreviewUrl(f ? URL.createObjectURL(f) : null);
   };

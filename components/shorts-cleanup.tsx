@@ -17,7 +17,7 @@ interface Orphan {
 interface EmptyPlaylist {
   id: number;
   name: string;
-  user_email: string | null;
+  owner_name: string | null;
 }
 
 // Admin tool: find shorts whose video file is gone from disk (they still show in
@@ -220,9 +220,9 @@ export default function ShortsCleanup({
               >
                 <ListX size={13} className="shrink-0 text-rose-300/70" />
                 <span className="truncate">{p.name}</span>
-                {p.user_email && (
+                {p.owner_name && (
                   <span className="ml-auto truncate text-white/30">
-                    {p.user_email}
+                    {p.owner_name}
                   </span>
                 )}
               </li>

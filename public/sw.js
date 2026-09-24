@@ -69,6 +69,9 @@ self.addEventListener("fetch", (event) => {
           if (res.ok && res.status === 200) {
             cache.put(req, res.clone());
             trimCache(cache);
+          } else if (res.status === 401 || res.status === 403 || res.status === 404) {
+            // Gone, private, or the viewer signed out: stop serving the copy.
+            cache.delete(req);
           }
           return res;
         })

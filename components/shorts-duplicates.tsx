@@ -87,6 +87,8 @@ export default function ShortsDuplicates({
   const [state, setState] = useState<ScanState | null>(null);
   const [groups, setGroups] = useState<Group[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  // Group keys already shown, so a poll does not re-seed their selection.
+  const seenGroupsRef = useRef<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   // Side-by-side player for one group, so the copies can be watched before
@@ -105,13 +107,28 @@ export default function ShortsDuplicates({
       if (!res.ok) return;
       const d = await res.json();
       setState(d.state);
-      setGroups(d.groups || []);
-      // Default selection: every non-best clip in every group.
-      const next = new Set<number>();
-      for (const g of d.groups || []) {
-        for (const m of g.members) if (!m.is_best) next.add(m.short_id);
+      const groups: Group[] = d.groups || [];
+      setGroups(groups);
+      // Default selection: every non-best clip of a group the user has not
+      // seen yet. Groups already on screen keep whatever the user toggled —
+      // this runs on a 3 s poll while a scan is going, and re-ticking a copy
+      // the user just kept would delete it on the next "Delete".
+      const seen = seenGroupsRef.current;
+      const live = new Set<number>();
+      const fresh = new Set<number>();
+      for (const g of groups) {
+        for (const m of g.members) {
+          live.add(m.short_id);
+          if (!seen.has(g.group_key) && !m.is_best) fresh.add(m.short_id);
+        }
       }
-      setSelected(next);
+      seenGroupsRef.current = new Set(groups.map((g) => g.group_key));
+      setSelected((prev) => {
+        const next = new Set<number>();
+        for (const id of prev) if (live.has(id)) next.add(id);
+        for (const id of fresh) next.add(id);
+        return next;
+      });
       return d.state as ScanState;
     } catch {
       /* ignore — transient */
@@ -195,6 +212,12 @@ export default function ShortsDuplicates({
       });
       if (!res.ok) return;
       setGroups((gs) => gs.filter((x) => x.group_key !== g.group_key));
+      // Confirmed distinct: they must leave the delete selection too.
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const m of g.members) next.delete(m.short_id);
+        return next;
+      });
       setPreview((p) => (p?.groupKey === g.group_key ? null : p));
     } catch {
       /* leave the group in place; the next load retries */

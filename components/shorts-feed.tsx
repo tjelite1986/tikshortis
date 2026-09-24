@@ -199,6 +199,7 @@ export default function ShortsFeed({
   // Monotonic id for the newest in-flight forward load, so a load superseded by
   // a mode switch neither clears the loading flag nor applies its page.
   const loadTokenRef = useRef(0);
+  const failuresRef = useRef(0);
 
   useEffect(() => {
     setChromeHidden(localStorage.getItem("shorts:chromeHidden") === "1");
@@ -269,6 +270,7 @@ export default function ShortsFeed({
     if (loading || !hasMore) return;
     const token = ++loadTokenRef.current;
     setLoading(true);
+    let failed = false;
     try {
       const url = new URL("/api/shorts/feed", window.location.origin);
       url.searchParams.set("channel", channel);
@@ -296,8 +298,20 @@ export default function ShortsFeed({
         });
         setCursor(data.nextCursor);
         setHasMore(data.nextCursor !== null);
+        failuresRef.current = 0;
+      } else if (!res.ok) {
+        failed = true;
       }
+    } catch {
+      failed = true;
     } finally {
+      // The sentinel re-fires as soon as loading clears, so a failure (a 500,
+      // being offline) must hold the flag for a while or the page hammers the
+      // API at round-trip speed.
+      if (failed) {
+        failuresRef.current += 1;
+        await new Promise((r) => setTimeout(r, Math.min(30_000, 1_000 * 2 ** failuresRef.current)));
+      }
       // Only the most recent load clears the flag — a stale load (superseded by
       // a mode switch) must not flip loading off while the new one is running.
       if (loadTokenRef.current === token) setLoading(false);

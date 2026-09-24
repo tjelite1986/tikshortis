@@ -12,10 +12,7 @@ interface Playlist {
   cover_id: number | null;
 }
 
-export default function ShortsPlaylists({
-}: {
-  // Section base path, so playlist links stay within the current section.
-}) {
+export default function ShortsPlaylists() {
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);

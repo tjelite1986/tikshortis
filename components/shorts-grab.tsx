@@ -670,7 +670,10 @@ export default function ShortsGrab() {
               <button
                 onClick={() => {
                   cancelRef.current = true;
+                  // close() fires no onerror, so the run state is cleared here.
                   esRef.current?.close();
+                  setRunning(false);
+                  setProgress(null);
                 }}
                 className="rounded-full bg-white/10 px-4 py-2 text-sm transition hover:bg-white/15"
               >

@@ -107,6 +107,7 @@ export default function ShortsGrid({
   // Orphans the pages still in flight when the filter changes, so tiles from
   // the previous filter can never land in the new list.
   const loadToken = useRef(0);
+  const failuresRef = useRef(0);
   // Device Back closes the move / edit sheet instead of leaving the page.
   useBackDismiss(moveId !== null, () => setMoveId(null));
   useBackDismiss(editClip !== null, () => setEditClip(null));
@@ -114,6 +115,7 @@ export default function ShortsGrid({
   const load = useCallback(async () => {
     if (loading || !hasMore) return;
     setLoading(true);
+    let failed = false;
     try {
       const url = new URL("/api/shorts/feed", window.location.origin);
       url.searchParams.set("limit", "30");
@@ -130,8 +132,19 @@ export default function ShortsGrid({
         });
         setCursor(data.nextCursor);
         setHasMore(data.nextCursor !== null);
+        failuresRef.current = 0;
+      } else if (!res.ok) {
+        failed = true;
       }
+    } catch {
+      failed = true;
     } finally {
+      // Hold the flag after a failure: the sentinel fires again the moment
+      // loading clears (see the feed for the same rule).
+      if (failed) {
+        failuresRef.current += 1;
+        await new Promise((r) => setTimeout(r, Math.min(30_000, 1_000 * 2 ** failuresRef.current)));
+      }
       setLoading(false);
       setLoadedOnce(true);
     }
