@@ -16,6 +16,13 @@ export const dynamic = "force-dynamic";
 // transcoder (v1b) only optimizes it later. Everything else stays 'pending'
 // until transcoded to .web.mp4 so the feed never serves an unplayable file.
 const WEB_PLAYABLE = new Set(["mp4", "m4v", "webm"]);
+// The whole file is buffered while it is written and probed, so the cap is
+// also a memory bound. Shorts are a few tens of MB; this leaves room for a
+// raw phone recording.
+const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+// The only error texts a client gets to see; anything else (ENOSPC, EACCES,
+// a path) is logged and replaced.
+const CLIENT_SAFE_ERRORS = new Set(["Unsupported file type — videos only"]);
 
 // Upload one short. Uploading to the 18+ channel requires an unlocked gate, so
 // you can't seed that channel without the PIN.
@@ -35,6 +42,9 @@ export async function POST(request: Request) {
 
   if (!(file instanceof File)) {
     return NextResponse.json({ error: "No file uploaded." }, { status: 400 });
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return NextResponse.json({ error: "File too large." }, { status: 413 });
   }
   if (!(await canAccessChannel(channel))) {
     return NextResponse.json({ error: "Locked" }, { status: 403 });
@@ -103,7 +113,9 @@ export async function POST(request: Request) {
   } catch (err) {
     console.error("[shorts] upload failed:", err);
     const message =
-      err instanceof Error ? err.message : "Failed to process upload";
+      err instanceof Error && CLIENT_SAFE_ERRORS.has(err.message)
+        ? err.message
+        : "Failed to process upload";
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }

@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import net from "node:net";
@@ -7,6 +8,10 @@ import path from "node:path";
 import { db, ShortProfileRow } from "./db";
 import { qb, getOne, getAll } from "./kysely";
 import { channelDir, profileSlug } from "./shorts-storage";
+
+// Async, never *Sync: these run inside a request on a single-process server,
+// and a synchronous yt-dlp call would freeze every other user for its duration.
+const execFileAsync = promisify(execFile);
 
 const YT_DLP = process.env.YT_DLP_BIN || "yt-dlp";
 
@@ -67,15 +72,15 @@ export interface Candidate {
 
 // True when the file contains at least one video stream. TikTok photo posts
 // (slideshows) expose only their mp3 music track to yt-dlp.
-function hasVideoStream(filePath: string): boolean {
+async function hasVideoStream(filePath: string): Promise<boolean> {
   try {
-    const out = execFileSync(
+    const { stdout } = await execFileAsync(
       "ffprobe",
       ["-v", "error", "-select_streams", "v", "-show_entries", "stream=codec_type",
        "-of", "csv=p=0", filePath],
-      { encoding: "utf8" }
+      { encoding: "utf8", timeout: 30_000 }
     );
-    return out.trim().length > 0;
+    return stdout.trim().length > 0;
   } catch {
     return false;
   }
@@ -113,13 +118,13 @@ function bestThumb(entry: any): string | null {
 // List the latest available clips for a profile (newest first) with thumbnail +
 // meta, flagging which are already imported. Enumerates with yt-dlp flat mode so
 // it's a single fast network call.
-export function enumerateCandidates(
+export async function enumerateCandidates(
   profile: ShortProfileRow,
   limit: number
-): Candidate[] {
+): Promise<Candidate[]> {
   let out = "";
   try {
-    out = execFileSync(
+    const { stdout } = await execFileAsync(
       YT_DLP,
       [
         "--flat-playlist",
@@ -133,6 +138,7 @@ export function enumerateCandidates(
       // (stays under the candidates route's maxDuration of 120s).
       { encoding: "utf8", maxBuffer: 128 * 1024 * 1024, timeout: limit > 40 ? 110_000 : 60_000 }
     );
+    out = stdout;
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string };
     out = e.stdout ? String(e.stdout) : "";
@@ -181,12 +187,12 @@ export function enumerateCandidates(
 // Download a single clip into the profile's folder and insert a 'pending' short
 // (the transcoder turns it into .web.mp4). Returns the new short id, or null on
 // failure / if it already exists.
-export function downloadOne(
+export async function downloadOne(
   profile: ShortProfileRow,
   videoUrl: string,
   sourceId: string,
   title: string | null
-): number | null {
+): Promise<number | null> {
   if (
     getOne(
       qb
@@ -204,7 +210,7 @@ export function downloadOne(
   fs.mkdirSync(dir, { recursive: true });
   const uuid = randomUUID();
 
-  execFileSync(
+  await execFileAsync(
     YT_DLP,
     [
       "--no-playlist",
@@ -221,7 +227,7 @@ export function downloadOne(
       "--",
       videoUrl,
     ],
-    { stdio: "ignore", timeout: 5 * 60 * 1000 }
+    { timeout: 5 * 60 * 1000, maxBuffer: 16 * 1024 * 1024 }
   );
 
   const produced = fs
@@ -231,7 +237,7 @@ export function downloadOne(
 
   // Photo/slideshow post: yt-dlp only gets the mp3 music track for those, so
   // the "video" would play as sound over a black screen. Reject it.
-  if (!hasVideoStream(path.join(dir, produced[0]))) {
+  if (!(await hasVideoStream(path.join(dir, produced[0])))) {
     for (const f of produced) fs.rmSync(path.join(dir, f), { force: true });
     throw new Error("This post is a photo/slideshow — it has no video.");
   }

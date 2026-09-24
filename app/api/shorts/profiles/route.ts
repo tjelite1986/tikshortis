@@ -7,6 +7,7 @@ import { deriveProfileName } from "@/lib/shorts-source";
 import { triggerPoll } from "@/lib/shorts-poll";
 import { handleOf } from "@/lib/people";
 import { CHANNEL } from "@/lib/shorts";
+import { assertDownloadableUrl } from "@/lib/shorts-download";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +18,7 @@ async function requireAdmin() {
   return { session };
 }
 
-export async function GET(request: Request) {
+export async function GET(_request: Request) {
   const auth = await requireAdmin();
   if ("error" in auth) {
     return NextResponse.json({ error: auth.error }, { status: auth.status });
@@ -71,6 +72,16 @@ export async function POST(request: Request) {
   } else {
     if (!sourceRef) {
       return NextResponse.json({ error: "A source is required." }, { status: 400 });
+    }
+    // The source is handed to yt-dlp and to fetch() later; only a public
+    // http(s) address is accepted, here and on edit.
+    try {
+      await assertDownloadableUrl(sourceRef);
+    } catch (err) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Invalid URL." },
+        { status: 400 }
+      );
     }
     // Auto-derive the display name from the source when left blank.
     if (!name) {

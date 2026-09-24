@@ -122,7 +122,7 @@ export interface FeedShort {
   channel: ShortChannel;
   caption: string | null;
   uploader_id: number | null;
-  uploader_email: string | null;
+  uploader_name: string | null;
   profile_id: number | null;
   profile_name: string | null;
   width: number | null;
@@ -145,7 +145,7 @@ export interface FeedShort {
 }
 
 interface FeedRow extends ShortRow {
-  uploader_email: string | null;
+  uploader_name: string | null;
   profile_name: string | null;
   like_count: number;
   comment_count: number;
@@ -244,7 +244,11 @@ export function getFeed(
       "s.source_id",
       "s.poster_key",
       "s.is_private",
-      "u.email as uploader_email",
+      // Display name only — never the email address (PII), same rule as the
+      // comments route.
+      sql<string | null>`COALESCE(u.display_name, u.username, substr(u.email, 1, instr(u.email, '@') - 1))`.as(
+        "uploader_name"
+      ),
       "p.name as profile_name",
       sql<number>`(SELECT COUNT(*) FROM short_likes l WHERE l.short_id = s.id)`.as(
         "like_count"
@@ -388,7 +392,7 @@ export function getFeed(
     channel: r.channel,
     caption: r.caption,
     uploader_id: r.uploader_id,
-    uploader_email: r.uploader_email,
+    uploader_name: r.uploader_name,
     profile_id: r.profile_id,
     profile_name: r.profile_name,
     width: r.width,

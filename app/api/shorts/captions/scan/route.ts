@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { staleRunning } from "@/lib/job-beacon";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { getSession } from "@/lib/auth";
@@ -21,10 +22,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const current = getOne<Pick<ShortCaptionStateRow, "status">>(
-    qb.selectFrom("short_caption_state").select("status").where("id", "=", 1)
+  const current = getOne<Pick<ShortCaptionStateRow, "status" | "started_at">>(
+    qb.selectFrom("short_caption_state").select(["status", "started_at"]).where("id", "=", 1)
   );
-  if (current?.status === "running") {
+  if (current?.status === "running" && !staleRunning(current.started_at)) {
     return NextResponse.json({ ok: true, alreadyRunning: true });
   }
 

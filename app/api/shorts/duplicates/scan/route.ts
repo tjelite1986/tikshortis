@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { staleRunning } from "@/lib/job-beacon";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { getSession } from "@/lib/auth";
@@ -7,16 +8,6 @@ import { db } from "@/lib/db";
 import { getDupeState } from "@/lib/shorts-duplicates";
 
 export const dynamic = "force-dynamic";
-
-// Treat a 'running' row older than an hour as stale: the detached scanner was
-// killed (docker restart / SIGKILL) without writing a final status, and without
-// this check the scan could never be restarted.
-const SCAN_STALE_MS = 60 * 60 * 1000;
-function staleRunning(startedAt: string | null): boolean {
-  if (!startedAt) return true;
-  const t = new Date(startedAt.replace(" ", "T") + "Z").getTime();
-  return !Number.isFinite(t) || Date.now() - t > SCAN_STALE_MS;
-}
 
 // Kick off a full duplicate scan (admin only). The scan can take minutes over a
 // large library, so it runs detached: this route just launches

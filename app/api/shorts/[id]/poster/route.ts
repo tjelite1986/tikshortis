@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import { Readable } from "node:stream";
@@ -34,7 +35,10 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
   }
 
   const stat = fs.statSync(filePath);
-  const etag = `"${short.poster_key}-${stat.size}-${Math.floor(stat.mtimeMs)}"`;
+  // The key itself may hold non-ASCII (a clip named in its own alphabet), which
+  // is not a valid header value — hash it.
+  const keyTag = createHash("sha1").update(short.poster_key).digest("hex").slice(0, 16);
+  const etag = `"${keyTag}-${stat.size}-${Math.floor(stat.mtimeMs)}"`;
   const headers = {
     ETag: etag,
     "Cache-Control": "private, no-cache",

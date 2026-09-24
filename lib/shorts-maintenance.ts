@@ -141,7 +141,7 @@ export function cleanupOrphanShorts(ids: number[]): { deleted: number } {
 export interface EmptyPlaylist {
   id: number;
   name: string;
-  user_email: string | null;
+  owner_name: string | null;
 }
 
 // Playlists that no longer hold a single visible (non-deleted) short — either
@@ -150,7 +150,8 @@ export interface EmptyPlaylist {
 export function findEmptyPlaylists(): EmptyPlaylist[] {
   return db
     .prepare(
-      `SELECT pl.id, pl.name, u.email AS user_email
+      `SELECT pl.id, pl.name,
+              COALESCE(u.display_name, u.username, substr(u.email, 1, instr(u.email, '@') - 1)) AS owner_name
          FROM short_playlists pl
          LEFT JOIN users u ON u.id = pl.user_id
         WHERE NOT EXISTS (

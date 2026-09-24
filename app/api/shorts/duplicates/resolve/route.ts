@@ -5,15 +5,15 @@ import { deleteDuplicates } from "@/lib/shorts-duplicates";
 
 export const dynamic = "force-dynamic";
 
-// Delete the chosen duplicate clips (admin only). Pass { shortIds: number[] };
-// the kept "best" clip of a group is refused so a group can't be wiped whole.
+// Delete the chosen duplicate clips (settings grant). Pass { shortIds: number[] };
+// only members of a duplicate group are eligible, and the kept "best" clip of
+// a group is refused so a group can't be wiped whole.
 // Soft-deletes the rows and removes the files from disk.
 export async function POST(request: Request) {
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  // Selected group ids may span both channels, so require both permissions.
   if (!hasShortsPermission(session)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }

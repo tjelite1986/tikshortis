@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+import { grabbitFetch, UNREACHABLE } from "@/lib/grabbit";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
-
-const GRABBIT = process.env.GRABBIT_URL || process.env.LADDA_URL || "http://grabbit:3000";
-const GRABBIT_HEADERS = { "x-grabbit-token": process.env.GRABBIT_INTERNAL_TOKEN || "" };
 
 // Proxy to the grabbit grabber: list every clip on a profile (admin only).
 export async function GET(req: Request) {
@@ -15,14 +13,11 @@ export async function GET(req: Request) {
   }
   const url = new URL(req.url).searchParams.get("url") || "";
   try {
-    const r = await fetch(`${GRABBIT}/api/profile?url=${encodeURIComponent(url)}`, { headers: GRABBIT_HEADERS });
+    const r = await grabbitFetch(`/api/profile?url=${encodeURIComponent(url)}`);
     // The status is deliberately not forwarded: Cloudflare replaces a 5xx
     // body with its own HTML page, and every caller reads `ok` from the JSON.
     return NextResponse.json(await r.json());
   } catch {
-    // 200, not 502: Cloudflare swallows a 5xx body and serves its own HTML
-    // error page, so the client would parse "<!DOCTYPE" instead of this.
-    // The failure is reported in the payload, which every caller reads.
-    return NextResponse.json({ ok: false, error: "Grabber unreachable" });
+    return NextResponse.json(UNREACHABLE);
   }
 }

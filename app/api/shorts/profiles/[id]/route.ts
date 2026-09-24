@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { db, ShortProfileRow } from "@/lib/db";
 import { qb, getOne } from "@/lib/kysely";
+import { assertDownloadableUrl } from "@/lib/shorts-download";
 
 export const dynamic = "force-dynamic";
 
@@ -47,6 +48,16 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
       : existing.videos_limit;
   const autoPoll =
     body.auto_poll !== undefined ? (body.auto_poll ? 1 : 0) : existing.auto_poll;
+  if (sourceRef !== existing.source_ref && sourceType !== "manual") {
+    try {
+      await assertDownloadableUrl(sourceRef);
+    } catch (err) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Invalid URL." },
+        { status: 400 }
+      );
+    }
+  }
 
   db.prepare(
     `UPDATE short_profiles

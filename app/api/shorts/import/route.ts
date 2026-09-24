@@ -17,7 +17,7 @@ export const maxDuration = 120;
 // script asynchronously —
 // a synchronous exec here would freeze the whole single-process server for the
 // duration of the import.
-export async function POST(request: Request) {
+export async function POST(_request: Request) {
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

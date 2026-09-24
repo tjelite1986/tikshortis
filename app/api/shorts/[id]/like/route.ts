@@ -26,24 +26,29 @@ export async function POST(_request: Request, props: { params: Promise<{ id: str
     return NextResponse.json({ error: "Locked" }, { status: 403 });
   }
 
-  const existing = getOne(
-    qb
-      .selectFrom("short_likes")
-      .select("short_id")
-      .where("short_id", "=", short.id)
-      .where("user_id", "=", userId)
-  );
-
-  if (existing) {
-    db.prepare("DELETE FROM short_likes WHERE short_id = ? AND user_id = ?").run(
-      short.id,
-      userId
+  // Read-then-write in one immediate transaction: a double-tap sends two
+  // requests, and outside a transaction both see "not liked" and the second
+  // INSERT hits the primary key.
+  const liked = db.transaction(() => {
+    const existing = getOne(
+      qb
+        .selectFrom("short_likes")
+        .select("short_id")
+        .where("short_id", "=", short.id)
+        .where("user_id", "=", userId)
     );
-  } else {
-    db.prepare(
-      "INSERT INTO short_likes (short_id, user_id) VALUES (?, ?)"
-    ).run(short.id, userId);
-  }
+    if (existing) {
+      db.prepare("DELETE FROM short_likes WHERE short_id = ? AND user_id = ?").run(
+        short.id,
+        userId
+      );
+    } else {
+      db.prepare(
+        "INSERT INTO short_likes (short_id, user_id) VALUES (?, ?)"
+      ).run(short.id, userId);
+    }
+    return !existing;
+  }).immediate();
 
   const count =
     getOne<{ n: number }>(
@@ -53,5 +58,5 @@ export async function POST(_request: Request, props: { params: Promise<{ id: str
         .where("short_id", "=", short.id)
     )?.n ?? 0;
 
-  return NextResponse.json({ ok: true, liked: !existing, like_count: count });
+  return NextResponse.json({ ok: true, liked, like_count: count });
 }

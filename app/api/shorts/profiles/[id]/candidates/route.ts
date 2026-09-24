@@ -34,7 +34,7 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
   const raw = Number(new URL(request.url).searchParams.get("limit"));
   const limit = Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), 200) : 40;
   try {
-    const candidates = enumerateCandidates(auth.profile, limit);
+    const candidates = await enumerateCandidates(auth.profile, limit);
     return NextResponse.json({ candidates });
   } catch (err) {
     console.error("[shorts] candidates failed:", err);
@@ -83,7 +83,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
   }
 
   try {
-    const shortId = downloadOne(auth.profile, url, sourceId, title);
+    const shortId = await downloadOne(auth.profile, url, sourceId, title);
     if (!shortId) {
       return NextResponse.json({ ok: true, alreadyDownloaded: true });
     }

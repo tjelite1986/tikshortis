@@ -117,9 +117,14 @@ async function askAnthropic(req: DescribeRequest): Promise<string> {
   return text.text;
 }
 
+const OPENROUTER_TIMEOUT_MS = 5 * 60 * 1000;
+
 async function askOpenRouter(req: DescribeRequest): Promise<string> {
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
+    // A hung connection would otherwise hold the summariser's "running" flag
+    // until the process restarts.
+    signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",

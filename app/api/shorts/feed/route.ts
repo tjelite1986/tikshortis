@@ -21,20 +21,20 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url);
   const cursorRaw = url.searchParams.get("cursor");
-  const cursor = cursorRaw && !isNaN(Number(cursorRaw)) ? Number(cursorRaw) : null;
+  const cursor = cursorRaw && Number.isInteger(Number(cursorRaw)) ? Number(cursorRaw) : null;
   // Backward pagination: fetch clips immediately newer than this id (scrolling
   // up in a feed opened mid-list). Takes precedence over cursor.
   const afterRaw = url.searchParams.get("after");
-  const after = afterRaw && !isNaN(Number(afterRaw)) ? Number(afterRaw) : null;
+  const after = afterRaw && Number.isInteger(Number(afterRaw)) ? Number(afterRaw) : null;
   const profileRaw = url.searchParams.get("profile");
-  const profileId = profileRaw && !isNaN(Number(profileRaw)) ? Number(profileRaw) : null;
+  const profileId = profileRaw && Number.isInteger(Number(profileRaw)) ? Number(profileRaw) : null;
   const playlistRaw = url.searchParams.get("playlist");
-  const playlistId = playlistRaw && !isNaN(Number(playlistRaw)) ? Number(playlistRaw) : null;
+  const playlistId = playlistRaw && Number.isInteger(Number(playlistRaw)) ? Number(playlistRaw) : null;
   // Person scope: union the owner's own uploads (uploader_id) with the profile.
   const ownerRaw = url.searchParams.get("owner");
-  const ownerId = ownerRaw && !isNaN(Number(ownerRaw)) ? Number(ownerRaw) : null;
+  const ownerId = ownerRaw && Number.isInteger(Number(ownerRaw)) ? Number(ownerRaw) : null;
   const limitRaw = Number(url.searchParams.get("limit"));
-  const limit = limitRaw && limitRaw > 0 ? Math.min(limitRaw, 40) : 10;
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 40) : 10;
   // "Mine" view: only the viewer's own uploads (public + private).
   const mineOnly = url.searchParams.get("mine") === "1";
   // Hashtag scope: only clips whose caption carries #tag (letters/digits/_).

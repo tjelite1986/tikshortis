@@ -101,6 +101,28 @@ export function sameOrigin(request: Request): boolean {
 }
 
 /**
+ * The proof for a GET that changes state (the grab proxies, which EventSource
+ * and a plain link can only reach with GET). A same-origin GET carries no
+ * Origin header, so this reads what the browser does send: `Sec-Fetch-Site`
+ * (every current browser), else the Referer, which the app's own
+ * `Referrer-Policy: same-origin` guarantees for its own pages. An <img> or a
+ * link on a sibling subdomain arrives as `same-site` with a foreign Referer,
+ * and fails.
+ */
+export function sameOriginPage(request: Request): boolean {
+  if (sameOrigin(request)) return true;
+  const site = request.headers.get("sec-fetch-site");
+  if (site) return site === "same-origin";
+  const referer = request.headers.get("referer");
+  if (!referer) return false;
+  try {
+    return new URL(referer).host === new URL(request.url).host;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The credential the host timers present. `docker exec`-ed scripts talk to the
  * routes over HTTP and have no browser; unset means closed, never "no gate
  * configured, let it through" — this app answers on a public hostname.

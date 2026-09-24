@@ -223,15 +223,29 @@ export async function storeShortUpload(
   // Keep the original readable name; only on a real collision add a short suffix
   // so two clips never clobber each other (avoids the old clip_<uuid> noise).
   const wanted = readableBase(filename, caption);
-  const base = fs.existsSync(path.join(dir, `${wanted}${ext}`))
-    ? `${wanted}_${randomUUID().slice(0, 8)}`
-    : wanted;
+  // Exclusive create, not exists-then-write: two uploads with the same name
+  // in flight at once would both see a free name and the second would
+  // overwrite the first. On a collision, retry with a short suffix.
   // A plain <subdir>/<file> key → videoPathFor()/posterPathFor() resolve it
   // under SHORTS_ROOT/<channel> automatically.
-  const storageKey = `${sub}/${base}${ext}`;
-  const videoPath = path.join(root, storageKey);
-  if (typeof source === "string") fs.copyFileSync(source, videoPath);
-  else fs.writeFileSync(videoPath, source);
+  let base = wanted;
+  let storageKey = `${sub}/${base}${ext}`;
+  let videoPath = path.join(root, storageKey);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if (typeof source === "string") {
+        fs.copyFileSync(source, videoPath, fs.constants.COPYFILE_EXCL);
+      } else {
+        fs.writeFileSync(videoPath, source, { flag: "wx" });
+      }
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= 5) throw err;
+      base = `${wanted}_${randomUUID().slice(0, 8)}`;
+      storageKey = `${sub}/${base}${ext}`;
+      videoPath = path.join(root, storageKey);
+    }
+  }
 
   const meta = readVideoMeta(videoPath);
 

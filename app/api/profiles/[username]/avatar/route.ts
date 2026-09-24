@@ -19,6 +19,8 @@ export const dynamic = "force-dynamic";
  * ELITE_INTERNAL_URL points at the container over the traefik network, so this
  * does not go out to the internet and back; ELITE_APP_URL is the fallback.
  */
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+
 export async function GET(
   request: Request,
   props: { params: Promise<{ username: string }> }
@@ -72,9 +74,20 @@ export async function GET(
   }
   if (!res.ok) return new NextResponse("Not found", { status: 404 });
 
-  return new NextResponse(await res.arrayBuffer(), {
+  // Whatever answers upstream is re-served same-origin, under a CSP that
+  // allows inline script. So only a picture gets through, and a bounded one.
+  const type = (res.headers.get("content-type") ?? "").split(";")[0].trim();
+  if (!type.startsWith("image/") || type === "image/svg+xml") {
+    return new NextResponse("Not found", { status: 404 });
+  }
+  const body = await res.arrayBuffer();
+  if (body.byteLength > AVATAR_MAX_BYTES) {
+    return new NextResponse("Not found", { status: 404 });
+  }
+
+  return new NextResponse(body, {
     headers: {
-      "Content-Type": res.headers.get("content-type") ?? "image/jpeg",
+      "Content-Type": type,
       "X-Content-Type-Options": "nosniff",
       "Content-Disposition": "inline",
       ETag: res.headers.get("etag") ?? "",

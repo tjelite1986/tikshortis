@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSession, hasAdminToken } from "@/lib/auth";
-import { canAccessChannel } from "@/lib/shorts";
+import { canAccessChannel, canViewShort, getShort } from "@/lib/shorts";
 import {
   requeueShortSummary,
   shortChannelOf,
@@ -21,14 +21,16 @@ export async function GET(request: Request) {
   }
 
   // ?id=<n> reads back one clip's description — what the UI polls for after
-  // starting a run. Same channel check as everywhere else here.
+  // starting a run. Same visibility rule as the clip itself: a private or
+  // deleted clip's summary is not readable by id.
   const id = Number(new URL(request.url).searchParams.get("id"));
-  if (Number.isFinite(id) && id > 0) {
-    const channel = shortChannelOf(id);
-    if (!channel) {
-      return NextResponse.json({ error: "Not found" }, { status: 404 });
-    }
-    if (!(await canAccessChannel(channel))) {
+  if (Number.isInteger(id) && id > 0) {
+    const short = getShort(id);
+    if (
+      !short ||
+      short.is_deleted ||
+      !canViewShort(short, Number(session.sub), session.role === "admin")
+    ) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
     return NextResponse.json({ summary: shortSummaryOf(id) });

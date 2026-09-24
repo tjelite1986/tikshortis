@@ -1,19 +1,24 @@
 import { NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
+import { getSession, sameOriginPage } from "@/lib/auth";
+import { grabbitFetch, UNREACHABLE } from "@/lib/grabbit";
 import { CHANNEL } from "@/lib/shorts";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-const GRABBIT = process.env.GRABBIT_URL || process.env.LADDA_URL || "http://grabbit:3000";
-const GRABBIT_HEADERS = { "x-grabbit-token": process.env.GRABBIT_INTERNAL_TOKEN || "" };
-
 // Proxy to the grabbit grabber: download one clip into the channel's import folder
 // (save-only — device=0). Admin only.
+//
+// A GET with a side effect: the middleware's CSRF check covers writes only, so
+// this route proves the page itself — an <img src> on a sibling subdomain would
+// otherwise carry the admin's cookie straight in.
 export async function GET(req: Request) {
   const session = await getSession();
   if (!session || session.role !== "admin") {
     return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+  }
+  if (!sameOriginPage(req)) {
+    return NextResponse.json({ ok: false, error: "Bad origin" }, { status: 403 });
   }
   const sp = new URL(req.url).searchParams;
   const qs = new URLSearchParams({
@@ -31,15 +36,12 @@ export async function GET(req: Request) {
   if (sp.get("web") === "1") qs.set("web", "1");
   if (sp.get("quality")) qs.set("quality", sp.get("quality") as string);
   try {
-    const r = await fetch(`${GRABBIT}/api/download?${qs.toString()}`, { headers: GRABBIT_HEADERS });
+    const r = await grabbitFetch(`/api/download?${qs.toString()}`);
     const data = await r.json().catch(() => ({ ok: false, error: "Download failed" }));
     // Upstream failures are reported in the body, not the status, so the
     // client always gets JSON back (see the catch below).
     return NextResponse.json(data);
   } catch {
-    // 200, not 502: Cloudflare swallows a 5xx body and serves its own HTML
-    // error page, so the client would parse "<!DOCTYPE" instead of this.
-    // The failure is reported in the payload, which every caller reads.
-    return NextResponse.json({ ok: false, error: "Grabber unreachable" });
+    return NextResponse.json(UNREACHABLE);
   }
 }

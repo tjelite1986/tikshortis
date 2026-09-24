@@ -51,10 +51,15 @@ export async function POST(request: Request) {
   const param = url.searchParams.get("channel");
   const channel = param ? parseChannel(param) : undefined;
 
-  const isAllowed = hasShortsPermission(session);
-  if (!isAllowed && !isCron) {
+  if (!session && !isCron) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  if (!isCron && !hasShortsPermission(session)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  // Purging playlists reaches every user's collections, so the settings
+  // grant is not enough: admin session or the timer.
+  const mayPurgePlaylists = isCron || session?.role === "admin";
 
   // Orphan cleanup rescans now so we only ever remove rows whose file is
   // genuinely missing at delete time (not whatever the client last saw).
@@ -62,6 +67,9 @@ export async function POST(request: Request) {
     cleanupOrphanShorts(findOrphanShorts(channel).map((o) => o.id)).deleted;
 
   if (action === "playlists") {
+    if (!mayPurgePlaylists) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
     return NextResponse.json({ ok: true, deleted: purgeEmptyPlaylists().deleted });
   }
 
@@ -70,7 +78,7 @@ export async function POST(request: Request) {
   // all profiles, uploaders and both channels.
   if (action === "all") {
     const orphans = runOrphans();
-    const playlists = purgeEmptyPlaylists().deleted;
+    const playlists = mayPurgePlaylists ? purgeEmptyPlaylists().deleted : 0;
     return NextResponse.json({ ok: true, orphans, playlists });
   }
 

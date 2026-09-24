@@ -194,6 +194,12 @@ export function deleteDuplicates(shortIds: number[]): {
   const isBest = db.prepare(
     "SELECT 1 FROM short_dupe_groups WHERE short_id = ? AND is_best = 1 LIMIT 1"
   );
+  // Only a clip the scanner put in a group is deletable here. The ids come
+  // from the client, and without this the route is a delete-anything endpoint
+  // for whoever holds the settings grant.
+  const inGroup = db.prepare(
+    "SELECT 1 FROM short_dupe_groups WHERE short_id = ? LIMIT 1"
+  );
   const softDelete = db.prepare("UPDATE shorts SET is_deleted = 1 WHERE id = ?");
   const dropGroupRow = db.prepare(
     "DELETE FROM short_dupe_groups WHERE short_id = ?"
@@ -213,6 +219,7 @@ export function deleteDuplicates(shortIds: number[]): {
 
   const tx = db.transaction(() => {
     for (const id of ids) {
+      if (!inGroup.get(id)) continue;
       if (isBest.get(id)) {
         skippedBest++;
         continue;
