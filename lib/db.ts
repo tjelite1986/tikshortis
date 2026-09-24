@@ -242,6 +242,18 @@ function migrate(db: Database.Database) {
       total INTEGER NOT NULL DEFAULT 0,
       message TEXT
     );
+
+    -- Owned by scripts/poll-shorts.mjs: a source id that failed to download,
+    -- with how many runs in a row it failed. Cleared on success; after the
+    -- script's limit the id moves into short_profiles.skipped_ids.
+    CREATE TABLE IF NOT EXISTS short_poll_failures (
+      profile_id INTEGER NOT NULL REFERENCES short_profiles(id) ON DELETE CASCADE,
+      source_id TEXT NOT NULL,
+      failures INTEGER NOT NULL DEFAULT 1,
+      last_error TEXT,
+      last_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, source_id)
+    );
   `);
 
   // Full-text index over captions, as a content table over `shorts` so the index
@@ -453,6 +465,14 @@ export interface ShortTitleStateRow {
 
 // Same shape, different job: the caption backfill.
 export type ShortCaptionStateRow = ShortTitleStateRow;
+
+export interface ShortPollFailureRow {
+  profile_id: number;
+  source_id: string;
+  failures: number;
+  last_error: string | null;
+  last_at: string;
+}
 
 export interface MediaFpRow {
   short_id: number;

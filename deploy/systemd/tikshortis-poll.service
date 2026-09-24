@@ -14,6 +14,12 @@ Group=CHANGEME
 # transcoder. This job REPLACED elitev2-shorts-poll, which is disabled: both
 # polling the same profiles would have downloaded every new clip twice, once
 # into each database, with two copies on disk.
+# Ceiling for one run. Note that systemd kills the `docker exec` client, not
+# the process inside the container: the per-command timeouts in the script are
+# what actually stops a hung ffmpeg or yt-dlp, and the script's own lockfile
+# prevents the next run from overlapping. This ceiling is the visible failure
+# (`systemctl --failed`) when something still ran away.
+TimeoutStartSec=45min
 ExecStart=/usr/bin/docker exec tikshortis node scripts/poll-shorts.mjs
 Nice=18
 IOSchedulingClass=idle

@@ -104,7 +104,7 @@ function enumerateYtDlp(ref, limit) {
         "--",
         ref,
       ],
-      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 120_000 }
     );
   } catch (err) {
     // yt-dlp exits non-zero on partial failures but may still print usable
@@ -167,7 +167,7 @@ function hasVideoStream(filePath) {
       "ffprobe",
       ["-v", "error", "-select_streams", "v", "-show_entries", "stream=codec_type",
        "-of", "csv=p=0", filePath],
-      { encoding: "utf8" }
+      { encoding: "utf8", timeout: 60_000 }
     );
     return out.trim().length > 0;
   } catch {
@@ -202,6 +202,25 @@ function download(url, dir, uuid) {
   return produced.length ? produced[0] : null;
 }
 
+// Everything yt-dlp left behind for this uuid: a `.part`, a lone audio or
+// video stream that never got merged, a `.ytdl` resume file. No row points at
+// any of it, so it would sit in the profile folder forever.
+function removeLeftovers(dir, uuid) {
+  let names;
+  try {
+    names = fs.readdirSync(dir).filter((f) => f.startsWith(`${uuid}.`));
+  } catch {
+    return;
+  }
+  for (const f of names) fs.rmSync(path.join(dir, f), { force: true });
+}
+
+// A source id that keeps failing (removed clip, geo-blocked, an extractor
+// yt-dlp no longer handles) was re-downloaded on every run forever. After this
+// many failed runs it joins skipped_ids like a photo post does. A run that
+// succeeds clears the counter, so a transient outage never gets a clip skipped.
+const MAX_DOWNLOAD_FAILURES = 3;
+
 // --- Main ------------------------------------------------------------------
 const db = new Database(DB_PATH);
 // busy_timeout FIRST: the WAL switch itself takes a write lock, and a
@@ -209,6 +228,29 @@ const db = new Database(DB_PATH);
 // timeout is set yet.
 db.pragma("busy_timeout = 10000"); // tolerate the app/transcoder writing too
 db.pragma("journal_mode = WAL");
+
+// Mirrored in lib/db.ts. One row per (profile, source id) that failed to
+// download; deleted on success or when the id is moved to skipped_ids.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS short_poll_failures (
+    profile_id INTEGER NOT NULL REFERENCES short_profiles(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL,
+    failures INTEGER NOT NULL DEFAULT 1,
+    last_error TEXT,
+    last_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (profile_id, source_id)
+  );
+`);
+const bumpFailure = db.prepare(
+  `INSERT INTO short_poll_failures (profile_id, source_id, failures, last_error, last_at)
+   VALUES (?, ?, 1, ?, datetime('now'))
+   ON CONFLICT(profile_id, source_id) DO UPDATE SET
+     failures = failures + 1, last_error = excluded.last_error, last_at = excluded.last_at
+   RETURNING failures`
+);
+const clearFailure = db.prepare(
+  "DELETE FROM short_poll_failures WHERE profile_id = ? AND source_id = ?"
+);
 
 // With a profile id argument, poll just that profile on demand (ignores the
 // auto_poll flag) — used by the "Poll now" button and on profile create.
@@ -284,10 +326,20 @@ for (const profile of profiles) {
       // subfolder, so the transcoder + media routes resolve it unchanged.
       const storageKey = `${slug}/${file}`;
       insert.run(profile.channel, profile.id, c.title, storageKey, String(c.id));
+      clearFailure.run(profile.id, String(c.id));
       totalNew++;
       log(`  + ${c.id} -> ${storageKey}`);
     } catch (err) {
-      log(`  ! ${c.id} download failed: ${String(err.message).slice(0, 120)}`);
+      removeLeftovers(dir, uuid);
+      const message = String(err.message).slice(0, 120);
+      const { failures } = bumpFailure.get(profile.id, String(c.id), message);
+      if (failures >= MAX_DOWNLOAD_FAILURES) {
+        newSkips.push(String(c.id));
+        clearFailure.run(profile.id, String(c.id));
+        log(`  ! ${c.id} download failed ${failures} times (${message}) — skipped permanently`);
+      } else {
+        log(`  ! ${c.id} download failed (${failures}/${MAX_DOWNLOAD_FAILURES}): ${message}`);
+      }
     }
   }
   if (newSkips.length > 0) {

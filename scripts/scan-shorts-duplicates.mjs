@@ -79,7 +79,7 @@ function probeMeta(filePath) {
         "-of", "json",
         filePath,
       ],
-      { encoding: "utf8" }
+      { encoding: "utf8", timeout: 60_000 }
     );
     const json = JSON.parse(out);
     const stream = (json.streams && json.streams[0]) || {};
@@ -108,7 +108,7 @@ function frameHash(filePath, seek) {
         "-f", "rawvideo",
         "-",
       ],
-      { maxBuffer: 1 << 20 }
+      { maxBuffer: 1 << 20, timeout: 60_000 }
     );
   } catch {
     return null;
@@ -378,8 +378,16 @@ try {
     if (list.length < 2) continue;
     for (const c of list) {
       if (c.sha == null) {
-        c.sha = sha256File(c.file);
-        hashed++;
+        // A clip that vanished or turned unreadable between the stat and here
+        // (the cleanup timer, a transcode swapping the file) must not end the
+        // whole scan; it simply stays unhashed and out of the byte-identical
+        // pass this run.
+        try {
+          c.sha = sha256File(c.file);
+          hashed++;
+        } catch (err) {
+          log(`phase B: cannot hash short ${c.id} (${c.file}): ${err.message}`);
+        }
       }
     }
   }

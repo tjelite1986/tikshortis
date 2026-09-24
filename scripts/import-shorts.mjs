@@ -176,7 +176,7 @@ function makePoster(videoPath, posterPath) {
     const out = execFileSync(
       "ffprobe",
       ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", videoPath],
-      { encoding: "utf8" }
+      { encoding: "utf8", timeout: 60_000 }
     );
     const dur = parseFloat(out.trim());
     if (dur > 0) pct = (dur * 0.25).toFixed(2);
@@ -192,7 +192,7 @@ function makePoster(videoPath, posterPath) {
         ["-y", "-hide_banner", "-loglevel", "error", "-nostdin",
          "-ss", seek, "-i", videoPath, "-vframes", "1",
          "-vf", "scale='min(720,iw)':-2", "-q:v", "5", posterPath],
-        { stdio: "ignore" }
+        { stdio: "ignore", timeout: 120_000 }
       );
     } catch {
       /* try the next seek */
@@ -235,11 +235,25 @@ db.pragma("journal_mode = WAL");
 // Existing profiles in this channel keyed by handle, so a dropped file reuses
 // the same person's profile even if the filename's capitalization differs.
 const profilesByHandle = new Map();
+const profilesById = new Map();
 for (const p of db
   .prepare("SELECT id, name FROM short_profiles WHERE channel = ?")
   .all(CHANNEL)) {
+  profilesById.set(p.id, p);
   const h = handleOf(p.name);
   if (h && !profilesByHandle.has(h)) profilesByHandle.set(h, p);
+}
+// Handles an admin merged away (Settings -> Merge profiles) map to the profile
+// that survived. Checked BEFORE the live profiles, like
+// lib/profiles.findOrCreateShortProfile does: without this a drop named after
+// an old handle recreated the duplicate that had just been merged.
+const aliasedProfileByHandle = new Map();
+for (const a of db
+  .prepare("SELECT name, profile_id FROM short_profile_aliases WHERE channel = ?")
+  .all(CHANNEL)) {
+  const h = handleOf(a.name);
+  const target = profilesById.get(a.profile_id);
+  if (h && target && !aliasedProfileByHandle.has(h)) aliasedProfileByHandle.set(h, target);
 }
 const insertProfile = db.prepare(
   `INSERT INTO short_profiles (name, channel, source_type, source_ref, auto_poll, videos_limit)
@@ -268,7 +282,7 @@ function hasVideoStream(filePath) {
       "ffprobe",
       ["-v", "error", "-select_streams", "v", "-show_entries", "stream=codec_type",
        "-of", "csv=p=0", filePath],
-      { encoding: "utf8" }
+      { encoding: "utf8", timeout: 60_000 }
     );
     return out.trim().length > 0;
   } catch {
@@ -276,19 +290,43 @@ function hasVideoStream(filePath) {
   }
 }
 
+// A file whose mtime is this recent may still be being written (a copy over
+// SMB or a browser download grows in place). Leave it for the next run.
+const SETTLE_MS = 30_000;
+
 let imported = 0;
 let profilesNew = 0;
 let skipped = 0;
+let deferred = 0;
 
 for (const entry of entries) {
-  const [stem, ext] = splitExt(entry.name);
+  const [stem, rawExt] = splitExt(entry.name);
+  // Extension compared and stored lowercase: `CLIP.MP4` is a video too, and
+  // the transcoder decides remux-vs-encode on a lowercased extension.
+  const ext = rawExt.toLowerCase();
   if (!VIDEO_EXTS.has(ext) && ext !== ".web.mp4") continue;
+
+  const srcPath = path.join(IMPORT_DIR, entry.name);
+  let st;
+  try {
+    st = fs.statSync(srcPath);
+  } catch (err) {
+    log(`skip ${entry.name}: ${err.message}`);
+    skipped++;
+    continue;
+  }
+  if (st.size === 0 || Date.now() - st.mtimeMs < SETTLE_MS) {
+    log(`defer ${entry.name}: still being written (${st.size} bytes, modified ${Math.round((Date.now() - st.mtimeMs) / 1000)} s ago)`);
+    deferred++;
+    continue;
+  }
 
   const profileName = sanitizeStem(parseProfile(stem));
   const handle = handleOf(profileName);
 
-  // Reuse an existing same-handle profile (any capitalization) or create one.
-  let profile = profilesByHandle.get(handle);
+  // A merged-away handle routes to the survivor; otherwise reuse an existing
+  // same-handle profile (any capitalization) or create one.
+  let profile = aliasedProfileByHandle.get(handle) || profilesByHandle.get(handle);
   if (!profile) {
     const r = insertProfile.run(profileName, CHANNEL);
     profile = { id: Number(r.lastInsertRowid), name: profileName };
@@ -321,7 +359,7 @@ for (const entry of entries) {
   }
 
   try {
-    fs.renameSync(path.join(IMPORT_DIR, entry.name), destVideo);
+    fs.renameSync(srcPath, destVideo);
   } catch (err) {
     log(`skip ${entry.name}: ${err.message}`);
     skipped++;
@@ -405,7 +443,7 @@ for (const entry of entries) {
 }
 
 log(
-  `done: ${imported} imported, ${profilesNew} new profiles, ${skipped} skipped`
+  `done: ${imported} imported, ${profilesNew} new profiles, ${skipped} skipped, ${deferred} deferred`
 );
-result({ imported, profilesNew, skipped });
+result({ imported, profilesNew, skipped, deferred });
 db.close();

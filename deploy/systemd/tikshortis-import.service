@@ -12,6 +12,12 @@ Group=CHANGEME
 # Runs inside the container (shares the /shorts-store mount, better-sqlite3 and
 # ffmpeg). Files in main/_import are moved into profile folders; plain originals
 # come in 'pending' for the transcoder.
+# Ceiling for one run. Note that systemd kills the `docker exec` client, not
+# the process inside the container: the per-command timeouts in the script are
+# what actually stops a hung ffmpeg or yt-dlp, and the script's own lockfile
+# prevents the next run from overlapping. This ceiling is the visible failure
+# (`systemctl --failed`) when something still ran away.
+TimeoutStartSec=30min
 ExecStart=/usr/bin/docker exec tikshortis node scripts/import-shorts.mjs
 Nice=18
 IOSchedulingClass=idle

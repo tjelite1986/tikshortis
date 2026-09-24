@@ -11,6 +11,12 @@ User=CHANGEME
 Group=CHANGEME
 # Runs inside the container so it shares its ffmpeg, better-sqlite3 and the
 # /shorts-store mount. The script is idempotent and locks against overlap.
+# Ceiling for one run. Note that systemd kills the `docker exec` client, not
+# the process inside the container: the per-command timeouts in the script are
+# what actually stops a hung ffmpeg or yt-dlp, and the script's own lockfile
+# prevents the next run from overlapping. This ceiling is the visible failure
+# (`systemctl --failed`) when something still ran away.
+TimeoutStartSec=2h
 ExecStart=/usr/bin/docker exec tikshortis node scripts/transcode-shorts.mjs
 Nice=15
 IOSchedulingClass=idle

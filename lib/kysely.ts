@@ -10,6 +10,7 @@ import {
   type ShortDupeStateRow,
   type ShortTitleStateRow,
   type ShortCaptionStateRow,
+  type ShortPollFailureRow,
   type ShortProfileRow,
   type ShortProfileAliasRow,
   type ShortPlaylistRow,
@@ -36,6 +37,7 @@ export interface DB {
   short_dupe_state: ShortDupeStateRow;
   short_title_state: ShortTitleStateRow;
   short_caption_state: ShortCaptionStateRow;
+  short_poll_failures: ShortPollFailureRow;
   short_media_fp: MediaFpRow;
   short_dupe_dismissals: ShortDupeDismissalRow;
   follows: FollowRow;

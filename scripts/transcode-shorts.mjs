@@ -29,6 +29,12 @@ const SHORTS_ROOT = process.env.SHORTS_ROOT || "/shorts-store";
 const PROFILE_ROOT = process.env.PROFILE_ROOT || "/profile-store";
 const isUploadKey = (key) => /^u_[^/]+\/(?:shorts18|shorts)\//.test(key);
 const LOCK = "/tmp/tikshortis-transcode.lock";
+// A stuck ffmpeg (truncated input, a codec that never reaches EOF) used to
+// hold the lock forever: every later timer run saw a live pid and exited.
+// A remux is I/O bound; a full encode of a multi-minute clip at 2 threads
+// can legitimately take a while, hence the wide ceiling.
+const REMUX_TIMEOUT_MS = 10 * 60 * 1000;
+const ENCODE_TIMEOUT_MS = 30 * 60 * 1000;
 
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
 
@@ -79,7 +85,7 @@ function videoCodec(filePath) {
         "-of", "csv=p=0",
         filePath,
       ],
-      { encoding: "utf8" }
+      { encoding: "utf8", timeout: 60_000 }
     );
     return out.trim().toLowerCase();
   } catch {
@@ -92,7 +98,7 @@ function remuxCopy(src, dst) {
     "ffmpeg",
     ["-y", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", src,
      "-c", "copy", "-movflags", "+faststart", dst],
-    { stdio: "ignore" }
+    { stdio: "ignore", timeout: REMUX_TIMEOUT_MS }
   );
 }
 
@@ -111,7 +117,7 @@ function fullTranscode(src, dst) {
      "-c:a", "aac", "-b:a", "128k", "-ac", "2",
      "-threads", "2",
      "-movflags", "+faststart", dst],
-    { stdio: "ignore" }
+    { stdio: "ignore", timeout: ENCODE_TIMEOUT_MS }
   );
 }
 
@@ -121,7 +127,7 @@ function makePoster(videoPath, posterPath) {
     const out = execFileSync(
       "ffprobe",
       ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", videoPath],
-      { encoding: "utf8" }
+      { encoding: "utf8", timeout: 60_000 }
     );
     const dur = parseFloat(out.trim());
     if (dur > 0) pct = (dur * 0.25).toFixed(2);
@@ -137,7 +143,7 @@ function makePoster(videoPath, posterPath) {
         ["-y", "-hide_banner", "-loglevel", "error", "-nostdin",
          "-ss", seek, "-i", videoPath, "-vframes", "1",
          "-vf", "scale='min(720,iw)':-2", "-q:v", "5", posterPath],
-        { stdio: "ignore" }
+        { stdio: "ignore", timeout: 120_000 }
       );
     } catch {
       /* try the next seek */
@@ -152,7 +158,7 @@ function videoDimensions(filePath) {
       "ffprobe",
       ["-v", "error", "-select_streams", "v:0",
        "-show_entries", "stream=width,height", "-of", "csv=p=0", filePath],
-      { encoding: "utf8" }
+      { encoding: "utf8", timeout: 60_000 }
     );
     const [w, h] = out.trim().split(",").map((n) => parseInt(n, 10));
     return { width: Number.isFinite(w) ? w : null, height: Number.isFinite(h) ? h : null };

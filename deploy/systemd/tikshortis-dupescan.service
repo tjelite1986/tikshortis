@@ -13,6 +13,12 @@ Group=CHANGEME
 # for review under Settings -> Duplicates. Deletes nothing. The per-clip
 # fingerprint cache (carried over in the migration) makes every run after the
 # first cheap. Pairs dismissed in the UI are skipped.
+# Ceiling for one run. Note that systemd kills the `docker exec` client, not
+# the process inside the container: the per-command timeouts in the script are
+# what actually stops a hung ffmpeg or yt-dlp, and the script's own lockfile
+# prevents the next run from overlapping. This ceiling is the visible failure
+# (`systemctl --failed`) when something still ran away.
+TimeoutStartSec=6h
 ExecStart=/usr/bin/docker exec tikshortis node scripts/scan-shorts-duplicates.mjs
 Nice=18
 IOSchedulingClass=idle

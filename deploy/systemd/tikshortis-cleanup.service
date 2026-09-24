@@ -13,6 +13,12 @@ Group=CHANGEME
 # path resolution and DB logic as the Settings buttons and cannot drift from
 # them. The credential comes from the container's own env rather than being
 # duplicated here.
+# Ceiling for one run. Note that systemd kills the `docker exec` client, not
+# the process inside the container: the per-command timeouts in the script are
+# what actually stops a hung ffmpeg or yt-dlp, and the script's own lockfile
+# prevents the next run from overlapping. This ceiling is the visible failure
+# (`systemctl --failed`) when something still ran away.
+TimeoutStartSec=15min
 ExecStart=/usr/bin/docker exec tikshortis sh -c 'curl -fsS -X POST "http://127.0.0.1:3000/api/shorts/maintenance?action=all" -H "x-admin-token: $ADMIN_TOKEN"'
 Nice=18
 IOSchedulingClass=idle

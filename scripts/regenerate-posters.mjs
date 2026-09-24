@@ -72,7 +72,7 @@ function videoDuration(filePath) {
     const out = execFileSync(
       "ffprobe",
       ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", filePath],
-      { encoding: "utf8" }
+      { encoding: "utf8", timeout: 60_000 }
     );
     const dur = parseFloat(out.trim());
     return Number.isFinite(dur) && dur > 0 ? dur : null;
@@ -92,7 +92,7 @@ function grabFrame(videoPath, seek, outPath) {
       ["-y", "-hide_banner", "-loglevel", "error", "-nostdin",
        "-ss", seek.toFixed(2), "-i", videoPath, "-frames:v", "1",
        "-vf", `scale='min(${POSTER_MAX},iw)':-2`, "-q:v", "3", outPath],
-      { stdio: "ignore" }
+      { stdio: "ignore", timeout: 120_000 }
     );
   } catch {
     /* checked by the caller via file size */
