@@ -312,6 +312,7 @@ export default function ShortsAdmin({
               )}
               <button
                 onClick={() => remove(p)}
+                aria-label={`Remove ${p.name}`}
                 className="rounded-full bg-white/10 p-2 text-white/60 transition hover:bg-rose-500/20 hover:text-rose-300"
               >
                 <Trash2 size={16} />

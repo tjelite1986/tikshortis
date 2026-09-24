@@ -94,6 +94,7 @@ export default function ShortsUpload({
             <button
               type="button"
               onClick={() => pick(null)}
+              aria-label="Remove chosen video"
               className="absolute right-2 top-2 rounded-full bg-black/60 p-1.5"
             >
               <X size={18} />
