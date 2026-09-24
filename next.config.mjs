@@ -21,10 +21,11 @@ const CSP = [
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // No "output: standalone". The maintenance scripts (import/transcode/poll)
-  // run inside this container via `docker exec` and need better-sqlite3, sharp
-  // and ffmpeg at runtime; Next only traces its own server, so the image ships
-  // the full production node_modules instead. Same shape as elite-v2.
+  // Standalone: the runner ships server.js plus the traced node_modules only.
+  // The maintenance scripts (import/transcode/poll) run inside the container
+  // via `docker exec` and need better-sqlite3 and sharp at runtime — both are
+  // imported by lib/, so the trace carries them. ffmpeg comes from apt.
+  output: "standalone",
   reactStrictMode: true,
   async headers() {
     return [
