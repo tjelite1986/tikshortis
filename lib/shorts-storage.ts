@@ -120,6 +120,12 @@ export function posterPathFor(
     : path.join(channelDir(channel), posterKey);
 }
 
+// A profile's avatar lives in its clip folder, so it moves and is deleted with
+// the profile's media: <SHORTS_ROOT>/<channel>/<slug>/avatar.jpg.
+export function avatarPathFor(channel: ShortChannel, avatarKey: string): string {
+  return path.join(channelDir(channel), avatarKey);
+}
+
 export interface StoredShort {
   storageKey: string; // e.g. "<uuid>.mp4"
   posterKey: string | null; // e.g. "<uuid>.jpg"

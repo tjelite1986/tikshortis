@@ -132,6 +132,11 @@ function migrate(db: Database.Database) {
       videos_limit INTEGER NOT NULL DEFAULT 20,
       skipped_ids TEXT NOT NULL DEFAULT '[]',
       last_polled_at TEXT,
+      -- Creator picture fetched from the source (TikTok profile page or the
+      -- yt-dlp playlist thumbnail), stored under the channel dir like a poster
+      -- key. avatar_checked_at throttles re-fetching whether or not it worked.
+      avatar_key TEXT,
+      avatar_checked_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -313,6 +318,22 @@ function migrate(db: Database.Database) {
     }
   }
 
+  const profileColumns = (
+    db.prepare("PRAGMA table_info(short_profiles)").all() as { name: string }[]
+  ).map((c) => c.name);
+  for (const [name, type] of [
+    ["avatar_key", "TEXT"],
+    ["avatar_checked_at", "TEXT"],
+  ] as const) {
+    if (!profileColumns.includes(name)) {
+      try {
+        db.exec(`ALTER TABLE short_profiles ADD COLUMN ${name} ${type}`);
+      } catch (e) {
+        if (!String(e).includes("duplicate column name")) throw e;
+      }
+    }
+  }
+
   // Both beacons are single-row by construction; create the row up front so
   // every reader can UPDATE instead of having to UPSERT.
   db.exec(`
@@ -403,6 +424,10 @@ export interface ShortProfileRow {
   videos_limit: number;
   skipped_ids: string;
   last_polled_at: string | null;
+  // Relative to the channel dir, e.g. "<slug>/avatar.jpg"; null until the
+  // poller has fetched one.
+  avatar_key: string | null;
+  avatar_checked_at: string | null;
   created_at: string;
 }
 

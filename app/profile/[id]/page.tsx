@@ -34,6 +34,14 @@ export default async function ShortsProfilePage(
         >
           <ChevronLeft size={18} />
         </Link>
+        {profile.avatar_key ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={`/api/shorts/profiles/${profile.id}/avatar?v=${encodeURIComponent(profile.avatar_checked_at ?? "")}`}
+            alt=""
+            className="h-14 w-14 shrink-0 rounded-full object-cover ring-1 ring-white/15"
+          />
+        ) : null}
         <div className="flex-1">
           <div className="text-lg font-semibold">@{profile.name}</div>
           <div className="text-xs text-white/50">

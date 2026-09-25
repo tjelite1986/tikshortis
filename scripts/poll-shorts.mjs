@@ -14,12 +14,19 @@
 // Dedup is by (profile_id, source_id): a clip already downloaded for the profile,
 // or listed in the profile's sticky skipped_ids, is never fetched again.
 // A lockfile guards against overlapping runs. Output goes to journald.
+//
+// The same run also keeps each profile's avatar fresh (see refreshAvatar):
+//   node scripts/poll-shorts.mjs            timer: clips for auto_poll profiles,
+//                                           plus a capped batch of stale avatars
+//   node scripts/poll-shorts.mjs <id>       one profile now: avatar + clips
+//   node scripts/poll-shorts.mjs --avatars  every stale avatar, no clip polling
 
 import Database from "better-sqlite3";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const DB_PATH = path.join(DATA_DIR, "tikshortis.db");
@@ -215,12 +222,6 @@ function removeLeftovers(dir, uuid) {
   for (const f of names) fs.rmSync(path.join(dir, f), { force: true });
 }
 
-// A source id that keeps failing (removed clip, geo-blocked, an extractor
-// yt-dlp no longer handles) was re-downloaded on every run forever. After this
-// many failed runs it joins skipped_ids like a photo post does. A run that
-// succeeds clears the counter, so a transient outage never gets a clip skipped.
-const MAX_DOWNLOAD_FAILURES = 3;
-
 // --- Main ------------------------------------------------------------------
 const db = new Database(DB_PATH);
 // busy_timeout FIRST: the WAL switch itself takes a write lock, and a
@@ -228,6 +229,141 @@ const db = new Database(DB_PATH);
 // timeout is set yet.
 db.pragma("busy_timeout = 10000"); // tolerate the app/transcoder writing too
 db.pragma("journal_mode = WAL");
+
+// Mirrored in lib/db.ts: the avatar columns, for a database the app has not
+// migrated yet (the local test harness opens a bare scratch DB).
+const profileColumns = db.prepare("PRAGMA table_info(short_profiles)").all().map((c) => c.name);
+for (const [name, type] of [["avatar_key", "TEXT"], ["avatar_checked_at", "TEXT"]]) {
+  if (!profileColumns.includes(name)) {
+    try {
+      db.exec(`ALTER TABLE short_profiles ADD COLUMN ${name} ${type}`);
+    } catch (e) {
+      if (!String(e).includes("duplicate column name")) throw e;
+    }
+  }
+}
+
+// --- Avatars -----------------------------------------------------------------
+// The creator picture is re-checked this often. TikTok's avatar URLs are signed
+// and expire within days, so the image is downloaded and kept, not linked.
+const AVATAR_TTL_DAYS = 7;
+// The timer run refreshes at most this many stale avatars per pass, so a
+// backlog never turns one poll into a burst of profile-page fetches.
+const AVATAR_BATCH = 20;
+const AVATAR_SIZE = 512;
+const AVATAR_FILE = "avatar.jpg";
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
+
+function isTikTok(ref) {
+  try {
+    const host = new URL(ref).hostname.toLowerCase();
+    return host === "tiktok.com" || host.endsWith(".tiktok.com");
+  } catch {
+    return false;
+  }
+}
+
+// TikTok's profile page embeds the user record as JSON in a <script> tag;
+// yt-dlp's tiktok:user extractor exposes no avatar at all, so the page itself
+// is the only source. The value is JSON-escaped ("\u002F" for "/").
+async function tiktokAvatarUrl(ref) {
+  const res = await fetch(ref, {
+    headers: { "User-Agent": BROWSER_UA, "Accept-Language": "en-US,en;q=0.9" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`profile page ${res.status}`);
+  const html = await res.text();
+  const m =
+    html.match(/"avatarLarger":"([^"]+)"/) ||
+    html.match(/"avatarMedium":"([^"]+)"/) ||
+    html.match(/"avatarThumb":"([^"]+)"/);
+  if (!m) throw new Error("no avatar in profile page");
+  const url = JSON.parse(`"${m[1]}"`);
+  if (!isHttp(url)) throw new Error("avatar url is not http(s)");
+  return url;
+}
+
+// Other yt-dlp sources (a YouTube channel, for one) carry the channel picture
+// as the playlist's own thumbnails; take the largest one.
+function ytDlpAvatarUrl(ref) {
+  const out = execFileSync(
+    YT_DLP,
+    ["--flat-playlist", "--playlist-end", "1", "--dump-single-json", "--no-warnings", "--", ref],
+    { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 60_000 }
+  );
+  const j = JSON.parse(out);
+  const thumbs = Array.isArray(j.thumbnails) ? j.thumbnails.filter((t) => isHttp(t?.url)) : [];
+  if (thumbs.length === 0) throw new Error("no playlist thumbnails");
+  thumbs.sort((a, b) => (b.width || 0) - (a.width || 0));
+  return thumbs[0].url;
+}
+
+// True for the byte signatures sharp can decode here. A login wall or an error
+// page arrives as HTTP 200 HTML, so the content is checked, not the headers.
+function looksLikeImage(buf) {
+  if (buf.length < 12) return false;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true; // JPEG
+  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])))
+    return true; // PNG
+  if (buf.subarray(0, 4).toString("latin1") === "RIFF" && buf.subarray(8, 12).toString("latin1") === "WEBP")
+    return true; // WebP
+  return false;
+}
+
+async function downloadAvatar(url, dest) {
+  const res = await fetch(url, {
+    headers: { "User-Agent": BROWSER_UA },
+    redirect: "follow",
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`avatar fetch ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!looksLikeImage(buf)) throw new Error("avatar is not an image");
+  const jpeg = await sharp(buf)
+    .rotate()
+    .resize(AVATAR_SIZE, AVATAR_SIZE, { fit: "cover" })
+    .jpeg({ quality: 85 })
+    .toBuffer();
+  // Write beside, then rename: a reader never sees a half-written file, and a
+  // failure leaves the previous avatar in place.
+  const tmp = `${dest}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, jpeg);
+  fs.renameSync(tmp, dest);
+}
+
+const markAvatar = db.prepare(
+  "UPDATE short_profiles SET avatar_key = ?, avatar_checked_at = datetime('now') WHERE id = ?"
+);
+
+// Fetch (or re-fetch) one profile's picture. Every outcome stamps
+// avatar_checked_at so a source with no picture is retried on the TTL, not on
+// every run; a failure keeps whatever avatar_key was there before.
+async function refreshAvatar(profile) {
+  if (profile.source_type === "manual" || !isHttp(profile.source_ref)) return;
+  const key = `${profileSlug(profile.name)}/${AVATAR_FILE}`;
+  try {
+    const url = isTikTok(profile.source_ref)
+      ? await tiktokAvatarUrl(profile.source_ref)
+      : ytDlpAvatarUrl(profile.source_ref);
+    // The folder is created only once there is something to put in it, so a
+    // source without a picture leaves no empty profile directory behind.
+    const dir = profileDir(profile.channel, profile.name);
+    await downloadAvatar(url, path.join(dir, AVATAR_FILE));
+    markAvatar.run(key, profile.id);
+    log(`profile ${profile.id} (${profile.name}): avatar updated`);
+  } catch (err) {
+    markAvatar.run(profile.avatar_key ?? null, profile.id);
+    log(`profile ${profile.id} (${profile.name}): avatar failed: ${String(err.message).slice(0, 120)}`);
+  }
+}
+
+// A source id that keeps failing (removed clip, geo-blocked, an extractor
+// yt-dlp no longer handles) was re-downloaded on every run forever. After this
+// many failed runs it joins skipped_ids like a photo post does. A run that
+// succeeds clears the counter, so a transient outage never gets a clip skipped.
+const MAX_DOWNLOAD_FAILURES = 3;
 
 // Mirrored in lib/db.ts. One row per (profile, source id) that failed to
 // download; deleted on success or when the id is moved to skipped_ids.
@@ -255,10 +391,33 @@ const clearFailure = db.prepare(
 // With a profile id argument, poll just that profile on demand (ignores the
 // auto_poll flag) — used by the "Poll now" button and on profile create.
 // Without one, poll every profile with auto_poll enabled (the timer path).
-const argId = process.argv[2] ? Number(process.argv[2]) : null;
+// `--avatars` refreshes every stale avatar and polls no clips (backfill).
+const args = process.argv.slice(2);
+const avatarsOnly = args.includes("--avatars");
+const idArg = args.find((a) => /^\d+$/.test(a));
+const argId = idArg ? Number(idArg) : null;
 const profiles = argId
   ? db.prepare("SELECT * FROM short_profiles WHERE id = ?").all(argId)
-  : db.prepare("SELECT * FROM short_profiles WHERE auto_poll = 1").all();
+  : avatarsOnly
+    ? []
+    : db.prepare("SELECT * FROM short_profiles WHERE auto_poll = 1").all();
+
+// Stale = never checked, or checked more than AVATAR_TTL_DAYS ago. The on-demand
+// path (an id) always refreshes; the timer path takes a capped batch across
+// ALL sourced profiles, auto_poll or not, so a paused profile keeps its face.
+const staleAvatars = argId
+  ? profiles
+  : db
+      .prepare(
+        `SELECT * FROM short_profiles
+          WHERE source_type != 'manual' AND source_ref != ''
+            AND (avatar_checked_at IS NULL
+                 OR avatar_checked_at < datetime('now', ?))
+          ORDER BY avatar_checked_at IS NOT NULL, avatar_checked_at, id
+          LIMIT ?`
+      )
+      .all(`-${AVATAR_TTL_DAYS} days`, avatarsOnly ? 100000 : AVATAR_BATCH);
+for (const profile of staleAvatars) await refreshAvatar(profile);
 
 let totalNew = 0;
 

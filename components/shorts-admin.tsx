@@ -16,7 +16,9 @@ interface Profile {
   videos_limit: number;
   last_polled_at: string | null;
   clip_count?: number;
-  cover_id?: number | null; // newest ready clip, shown as the profile's picture
+  cover_id?: number | null; // newest ready clip, the picture when no avatar exists
+  avatar_key?: string | null; // creator picture fetched by the poller
+  avatar_checked_at?: string | null;
 }
 
 // Where a profile's clips come from, read off the source URL: the schema only
@@ -323,12 +325,22 @@ export default function ShortsAdmin({
             key={p.id}
             className="flex items-center gap-3 rounded-xl bg-white/5 p-4 ring-1 ring-white/10"
           >
-            {/* Poster of the newest ready clip stands in for a profile picture */}
+            {/* The creator's own picture when the poller has fetched one;
+                the newest clip's poster otherwise. `v` pins the URL to the
+                fetch time so a refreshed avatar is never served from cache. */}
             <Link
               href={`/profile/${p.id}`}
-              className="h-12 w-12 shrink-0 overflow-hidden rounded-lg bg-black/30"
+              className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-black/30"
             >
-              {p.cover_id ? (
+              {p.avatar_key ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={`/api/shorts/profiles/${p.id}/avatar?v=${encodeURIComponent(p.avatar_checked_at ?? "")}`}
+                  alt=""
+                  loading="lazy"
+                  className="h-full w-full object-cover"
+                />
+              ) : p.cover_id ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={`/api/shorts/${p.cover_id}/poster?c=2`}

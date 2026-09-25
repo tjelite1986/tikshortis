@@ -424,6 +424,8 @@ export interface ProfileSummary {
   name: string;
   channel: ShortChannel;
   clip_count: number;
+  avatar_key: string | null;
+  avatar_checked_at: string | null;
 }
 
 // Public-facing profile lookup (any authed user, gated by channel) for the
@@ -436,6 +438,8 @@ export function getProfileSummary(id: number): ProfileSummary | undefined {
         "p.id",
         "p.name",
         "p.channel",
+        "p.avatar_key",
+        "p.avatar_checked_at",
         // Pure-builder correlated subquery — no raw SQL needed here.
         eb
           .selectFrom("shorts as s")
