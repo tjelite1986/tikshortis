@@ -16,6 +16,33 @@ interface Profile {
   videos_limit: number;
   last_polled_at: string | null;
   clip_count?: number;
+  cover_id?: number | null; // newest ready clip, shown as the profile's picture
+}
+
+// Where a profile's clips come from, read off the source URL: the schema only
+// knows yt-dlp / rss / manual, and TikTok and YouTube are both yt-dlp.
+type SourceKind = "tiktok" | "youtube" | "other" | "manual";
+
+const KIND_LABEL: Record<SourceKind, string> = {
+  tiktok: "TikTok",
+  youtube: "YouTube",
+  other: "Other",
+  manual: "Manual",
+};
+
+function sourceKind(p: Profile): SourceKind {
+  if (p.source_type === "manual") return "manual";
+  let host: string;
+  try {
+    host = new URL(p.source_ref).hostname.toLowerCase();
+  } catch {
+    host = p.source_ref.toLowerCase();
+  }
+  if (host === "tiktok.com" || host.endsWith(".tiktok.com")) return "tiktok";
+  if (host === "youtu.be" || host === "youtube.com" || host.endsWith(".youtube.com")) {
+    return "youtube";
+  }
+  return "other";
 }
 
 const EMPTY = {
@@ -48,7 +75,17 @@ export default function ShortsAdmin({
   const [busy, setBusy] = useState(false);
   const [confirmDialog, confirmAsk] = useConfirm();
   const [polling, setPolling] = useState<Set<number>>(new Set());
+  const [kind, setKind] = useState<SourceKind | "all">("all");
   const pollWatch = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Chips are offered only for the kinds actually present, in a fixed order.
+  const kindCounts = new Map<SourceKind, number>();
+  for (const p of profiles) {
+    const k = sourceKind(p);
+    kindCounts.set(k, (kindCounts.get(k) ?? 0) + 1);
+  }
+  const kinds = (Object.keys(KIND_LABEL) as SourceKind[]).filter((k) => kindCounts.has(k));
+  const visible = kind === "all" ? profiles : profiles.filter((p) => sourceKind(p) === kind);
 
   const refresh = useCallback(async () => {
     const url = channel
@@ -249,17 +286,59 @@ export default function ShortsAdmin({
         </button>
       </form>
 
+      {/* Source filter — same pills as the Settings tabs */}
+      {kinds.length > 1 && (
+        <div className="mb-4 flex gap-1.5 overflow-x-auto pb-1">
+          {(["all", ...kinds] as (SourceKind | "all")[]).map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setKind(k)}
+              className={cn(
+                "shrink-0 rounded-full px-3.5 py-1.5 text-sm transition",
+                k === kind
+                  ? "bg-rose-500 font-semibold text-white"
+                  : "bg-white/5 text-white/60 hover:text-white/90"
+              )}
+            >
+              {k === "all" ? "All" : KIND_LABEL[k]}{" "}
+              <span className="opacity-60">
+                {k === "all" ? profiles.length : kindCounts.get(k)}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Existing profiles */}
       <div className="space-y-3">
         {profiles.length === 0 && (
           <p className="text-sm text-white/40">No profiles yet.</p>
         )}
-        {profiles.map((p) => (
+        {profiles.length > 0 && visible.length === 0 && kind !== "all" && (
+          <p className="text-sm text-white/40">No {KIND_LABEL[kind]} profiles.</p>
+        )}
+        {visible.map((p) => (
           <div
             key={p.id}
-            className="flex items-center justify-between gap-3 rounded-xl bg-white/5 p-4 ring-1 ring-white/10"
+            className="flex items-center gap-3 rounded-xl bg-white/5 p-4 ring-1 ring-white/10"
           >
-            <div className="min-w-0">
+            {/* Poster of the newest ready clip stands in for a profile picture */}
+            <Link
+              href={`/profile/${p.id}`}
+              className="h-12 w-12 shrink-0 overflow-hidden rounded-lg bg-black/30"
+            >
+              {p.cover_id ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={`/api/shorts/${p.cover_id}/poster?c=2`}
+                  alt=""
+                  loading="lazy"
+                  className="h-full w-full object-cover"
+                />
+              ) : null}
+            </Link>
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 font-medium">
                 <Link href={`/profile/${p.id}`} className="hover:underline">
                   {p.name}

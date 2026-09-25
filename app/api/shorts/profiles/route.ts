@@ -24,15 +24,20 @@ export async function GET(_request: Request) {
     return NextResponse.json({ error: auth.error }, { status: auth.status });
   }
 
-  const profiles = getAll<ShortProfileRow & { clip_count: number }>(
+  // cover_id is the newest ready clip, the same choice the Profiles grid makes,
+  // so the admin list can show a poster without a dedicated avatar column.
+  const profiles = getAll<ShortProfileRow & { clip_count: number; cover_id: number | null }>(
     qb
       .selectFrom("short_profiles as p")
       .selectAll("p")
-      .select(
+      .select([
         sql<number>`(SELECT COUNT(*) FROM shorts s WHERE s.profile_id = p.id AND s.is_deleted = 0)`.as(
           "clip_count"
-        )
-      )
+        ),
+        sql<number | null>`(SELECT MAX(s.id) FROM shorts s WHERE s.profile_id = p.id AND s.is_deleted = 0 AND s.status = 'ready')`.as(
+          "cover_id"
+        ),
+      ])
       .where("p.channel", "=", CHANNEL)
       .orderBy("p.created_at", "desc")
   );
