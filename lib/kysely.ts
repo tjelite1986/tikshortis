@@ -13,6 +13,7 @@ import {
   type ShortPollFailureRow,
   type ShortProfileRow,
   type ShortProfileAliasRow,
+  type ShortProfileLinkRow,
   type ShortPlaylistRow,
   type ShortPlaylistItemRow,
   type FollowRow,
@@ -31,6 +32,7 @@ export interface DB {
   short_comments: ShortCommentRow;
   short_profiles: ShortProfileRow;
   short_profile_aliases: ShortProfileAliasRow;
+  short_profile_links: ShortProfileLinkRow;
   short_playlists: ShortPlaylistRow;
   short_playlist_items: ShortPlaylistItemRow;
   short_dupe_groups: ShortDupeGroupRow;

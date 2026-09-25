@@ -1,5 +1,13 @@
 import { sql } from "kysely";
-import { db, ShortRow, ShortChannel } from "./db";
+import {
+  db,
+  ShortRow,
+  ShortChannel,
+  ShortProfileRow,
+  ShortProfileLinkRow,
+  ShortProfileLinkKind,
+} from "./db";
+import { kindForUrl, linkUrlKey, parseLinkUrl } from "./profile-links";
 import { qb, getOne, getAll } from "./kysely";
 import { personContentIds } from "./people";
 
@@ -423,7 +431,10 @@ export interface ProfileSummary {
   id: number;
   name: string;
   channel: ShortChannel;
+  source_type: ShortProfileRow["source_type"];
+  source_ref: string;
   clip_count: number;
+  like_count: number;
   avatar_key: string | null;
   avatar_checked_at: string | null;
 }
@@ -438,6 +449,8 @@ export function getProfileSummary(id: number): ProfileSummary | undefined {
         "p.id",
         "p.name",
         "p.channel",
+        "p.source_type",
+        "p.source_ref",
         "p.avatar_key",
         "p.avatar_checked_at",
         // Pure-builder correlated subquery — no raw SQL needed here.
@@ -448,9 +461,65 @@ export function getProfileSummary(id: number): ProfileSummary | undefined {
           .where("s.is_deleted", "=", 0)
           .where("s.status", "=", "ready")
           .as("clip_count"),
+        // Likes across the profile's live clips, for the stats row.
+        eb
+          .selectFrom("short_likes as l")
+          .innerJoin("shorts as s", "s.id", "l.short_id")
+          .select((e) => e.fn.countAll<number>().as("c"))
+          .whereRef("s.profile_id", "=", "p.id")
+          .where("s.is_deleted", "=", 0)
+          .where("s.status", "=", "ready")
+          .as("like_count"),
       ])
       .where("p.id", "=", id)
   );
+}
+
+export interface ProfileLink {
+  // null for the link derived from the poll source: it has no row to delete.
+  id: number | null;
+  kind: ShortProfileLinkKind;
+  url: string;
+  label: string | null;
+  from_source: boolean;
+}
+
+// The icon row on a profile page: the poll source first (derived, never
+// stored — see short_profile_links in db.ts), then the admin-entered links in
+// the order they were added. A stored link to the same page as the source
+// hides the derived one rather than showing the platform twice.
+export function getProfileLinks(
+  profile: Pick<ProfileSummary, "id" | "source_type" | "source_ref">
+): ProfileLink[] {
+  const stored = getAll<ShortProfileLinkRow>(
+    qb
+      .selectFrom("short_profile_links")
+      .selectAll()
+      .where("profile_id", "=", profile.id)
+      .orderBy("id", "asc")
+  ).map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    url: r.url,
+    label: r.label,
+    from_source: false,
+  }));
+
+  const links: ProfileLink[] = [];
+  if (profile.source_type !== "manual" && parseLinkUrl(profile.source_ref)) {
+    const key = linkUrlKey(profile.source_ref);
+    if (!stored.some((l) => linkUrlKey(l.url) === key)) {
+      const kind = kindForUrl(profile.source_ref);
+      links.push({
+        id: null,
+        kind,
+        url: profile.source_ref.trim(),
+        label: kind === "other" ? "Source" : null,
+        from_source: true,
+      });
+    }
+  }
+  return links.concat(stored);
 }
 
 export interface CreatorCard {

@@ -150,6 +150,23 @@ function migrate(db: Database.Database) {
       PRIMARY KEY (channel, name)
     );
 
+    -- A creator's social links, shown as an icon row on the profile page and
+    -- edited there by an admin. The poll source (short_profiles.source_ref) is
+    -- NOT stored here: it is derived into the same row at read time, so it can
+    -- never drift from the URL the poller actually uses.
+    CREATE TABLE IF NOT EXISTS short_profile_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id INTEGER NOT NULL REFERENCES short_profiles(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('tiktok','instagram','youtube','facebook','other')),
+      url TEXT NOT NULL,
+      -- Free text shown for an 'other' link (e.g. "Linktree"); the branded kinds
+      -- are identified by their icon.
+      label TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_short_profile_links_profile
+      ON short_profile_links(profile_id, id);
+
     -- Following. In elite-v2 a follow could point at a user, a post creator or a
     -- shorts profile, and the feed had to resolve all three through the unified
     -- person graph. Here there are only two kinds of face, so the graph collapses
@@ -435,6 +452,17 @@ export interface ShortProfileAliasRow {
   channel: ShortChannel;
   name: string;
   profile_id: number;
+}
+
+export type ShortProfileLinkKind = "tiktok" | "instagram" | "youtube" | "facebook" | "other";
+
+export interface ShortProfileLinkRow {
+  id: number;
+  profile_id: number;
+  kind: ShortProfileLinkKind;
+  url: string;
+  label: string | null;
+  created_at: string;
 }
 
 export interface FollowRow {
