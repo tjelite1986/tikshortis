@@ -23,6 +23,9 @@ import {
   MoreVertical,
   ListVideo,
   Download,
+  Gauge,
+  PictureInPicture2,
+  ChevronsDown,
   Pencil,
   Hash,
   Maximize,
@@ -40,7 +43,8 @@ import { CommentsSheet, ShareSheet, SaveSheet } from "@/components/short-sheets"
 const SEEK_SECONDS = 10; // double-tap skip distance
 const SEEK_ZONE = 0.35; // outer-third tap = seek, middle = like
 const DOUBLE_TAP_MS = 220; // window to detect a second tap
-const LONG_PRESS_MS = 550; // hold to toggle the clean view
+const LONG_PRESS_MS = 550; // hold to open the player menu
+const PLAYBACK_RATES = [0.5, 1, 1.5, 2] as const;
 const BURST_MS = 700; // like-heart animation
 const SEEK_HINT_MS = 600; // seek indicator linger
 
@@ -140,6 +144,9 @@ export default function ShortCard({
   onToggleChrome,
   onToggleFullscreen,
   autoAdvance = false,
+  onToggleAutoScroll,
+  playbackRate = 1,
+  onSetPlaybackRate,
   onEnded,
   onRemoved,
 }: {
@@ -161,6 +168,10 @@ export default function ShortCard({
   // Auto-scroll: don't loop; fire onEnded when the clip finishes so the feed
   // can advance to the next one.
   autoAdvance?: boolean;
+  onToggleAutoScroll?: () => void;
+  // Playback speed (player menu). Owned by the feed so it carries across clips.
+  playbackRate?: number;
+  onSetPlaybackRate?: (rate: number) => void;
   onEnded?: () => void;
   // Called after the clip left this feed (moved to the other channel, or
   // deleted) so the parent can drop the card and snap to the next clip.
@@ -214,14 +225,16 @@ export default function ShortCard({
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressed = useRef(false);
 
-  // Long-press toggles the clean (chrome-hidden) view, the only way back once
-  // the rail is hidden. Any movement cancels it so it never fires while
+  // Long-press opens the player menu (the same sheet as the 3-dot button);
+  // with the overlay hidden it is the only way back. The sheet opens on
+  // release rather than when the timer fires, so the trailing click still
+  // lands on the video and is swallowed in onTap instead of hitting the
+  // sheet's backdrop. Any movement cancels it so it never fires while
   // scrolling between clips.
   const onPointerDown = () => {
     longPressed.current = false;
     longPressTimer.current = setTimeout(() => {
       longPressed.current = true;
-      onToggleChrome?.();
     }, LONG_PRESS_MS);
   };
   const cancelLongPress = () => {
@@ -230,6 +243,32 @@ export default function ShortCard({
       longPressTimer.current = null;
     }
   };
+  const onPointerUp = () => {
+    cancelLongPress();
+    if (longPressed.current) setShowMore(true);
+  };
+
+  // Picture-in-Picture: only where the browser implements the standard API
+  // (Firefox does not), decided after mount so server and client markup agree.
+  const [pipSupported, setPipSupported] = useState(false);
+  useEffect(() => {
+    setPipSupported(
+      document.pictureInPictureEnabled &&
+        typeof HTMLVideoElement.prototype.requestPictureInPicture === "function"
+    );
+  }, []);
+  const enterPip = () => {
+    videoRef.current?.requestPictureInPicture().catch(() => {});
+  };
+
+  // Playback speed. defaultPlaybackRate as well, because a (re)load of the
+  // media resets playbackRate to it.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.defaultPlaybackRate = playbackRate;
+    v.playbackRate = playbackRate;
+  }, [playbackRate]);
 
   // Admin "describe": sample frames from the clip and have a vision model read
   // them. One API call, so it is a deliberate tap — and the result is shown
@@ -464,7 +503,7 @@ export default function ShortCard({
   };
 
   const onTap = (e: React.MouseEvent) => {
-    // A long-press just toggled the chrome — swallow the trailing click.
+    // A long-press just opened the menu — swallow the trailing click.
     if (longPressed.current) {
       longPressed.current = false;
       return;
@@ -534,7 +573,7 @@ export default function ShortCard({
         preload="metadata"
         onClick={onTap}
         onPointerDown={onPointerDown}
-        onPointerUp={cancelLongPress}
+        onPointerUp={onPointerUp}
         onPointerMove={cancelLongPress}
         onPointerCancel={cancelLongPress}
         onPointerLeave={cancelLongPress}
@@ -845,7 +884,10 @@ export default function ShortCard({
           </div>
         </div>
       )}
-      {/* 3-dot menu: view controls for everyone, management for owner/admin. */}
+      {/* Player menu, opened by the 3-dot button or a long-press on the clip.
+          Modelled on TikTok's long-press sheet: view controls for everyone
+          first, management for owner/admin below. Speed and Auto scroll keep
+          the sheet open so the new state is visible. */}
       {showMore && (
         <div
           className="absolute inset-0 z-20 flex items-end justify-center bg-black/60"
@@ -856,13 +898,62 @@ export default function ShortCard({
             onClick={(e) => e.stopPropagation()}
           >
             <MoreRow
+              icon={<Download size={18} />}
+              label="Download"
+              href={`/api/shorts/${short.id}/video?download=1`}
+              onClick={() => setShowMore(false)}
+            />
+            <div className="my-1 border-t border-white/10" />
+            {onSetPlaybackRate && (
+              <div className="flex items-center gap-3 px-5 py-2.5 text-sm text-white">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10">
+                  <Gauge size={18} />
+                </span>
+                Speed
+                <div className="ml-auto flex rounded-lg bg-white/10 p-0.5">
+                  {PLAYBACK_RATES.map((rate) => (
+                    <button
+                      key={rate}
+                      onClick={() => onSetPlaybackRate(rate)}
+                      className={cn(
+                        "rounded-md px-2.5 py-1 text-xs tabular-nums transition",
+                        rate === playbackRate
+                          ? "bg-white font-semibold text-black"
+                          : "text-white/60"
+                      )}
+                    >
+                      {rate.toFixed(1)}×
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <MoreRow
               icon={<Minimize2 size={18} />}
-              label={chromeHidden ? "Show overlay" : "Hide overlay"}
+              label={chromeHidden ? "Show overlay" : "Clear display"}
               onClick={() => {
                 setShowMore(false);
                 onToggleChrome?.();
               }}
             />
+            {onToggleAutoScroll && (
+              <MoreRow
+                icon={<ChevronsDown size={18} />}
+                label="Auto scroll"
+                onClick={onToggleAutoScroll}
+                trailing={<Switch on={autoAdvance} />}
+              />
+            )}
+            {pipSupported && (
+              <MoreRow
+                icon={<PictureInPicture2 size={18} />}
+                label="Picture-in-Picture"
+                onClick={() => {
+                  setShowMore(false);
+                  enterPip();
+                }}
+              />
+            )}
             {onToggleFullscreen && (
               <MoreRow
                 icon={<Maximize size={18} />}
@@ -1024,30 +1115,64 @@ function RailLink({
   );
 }
 
-// One row in the 3-dot menu sheet.
+// One row in the player menu sheet. With `href` it navigates (Download);
+// `trailing` sits at the right edge (a switch).
 function MoreRow({
   icon,
   label,
   onClick,
+  href,
+  trailing,
   danger = false,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
+  href?: string;
+  trailing?: React.ReactNode;
   danger?: boolean;
 }) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "flex w-full items-center gap-3 px-5 py-3 text-left text-sm transition hover:bg-white/5",
-        danger ? "text-red-400" : "text-white"
-      )}
-    >
-      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-white/10">
+  const className = cn(
+    "flex w-full items-center gap-3 px-5 py-3 text-left text-sm transition hover:bg-white/5",
+    danger ? "text-red-400" : "text-white"
+  );
+  const body = (
+    <>
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10">
         {icon}
       </span>
       {label}
+      {trailing && <span className="ml-auto">{trailing}</span>}
+    </>
+  );
+  return href ? (
+    <a href={href} onClick={onClick} className={className}>
+      {body}
+    </a>
+  ) : (
+    <button onClick={onClick} className={className}>
+      {body}
     </button>
+  );
+}
+
+// Toggle indicator for a menu row; the row itself is the control.
+function Switch({ on }: { on: boolean }) {
+  return (
+    <span
+      role="switch"
+      aria-checked={on}
+      className={cn(
+        "inline-flex h-6 w-11 items-center rounded-full p-0.5 transition-colors",
+        on ? "bg-rose-500" : "bg-white/20"
+      )}
+    >
+      <span
+        className={cn(
+          "h-5 w-5 rounded-full bg-white shadow transition-transform",
+          on && "translate-x-5"
+        )}
+      />
+    </span>
   );
 }

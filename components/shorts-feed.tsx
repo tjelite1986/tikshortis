@@ -183,7 +183,7 @@ export default function ShortsFeed({
   const { muted, toggleMuted, soundBlocked } = useSoundPreference();
   // Three independent toggles, each with its own button in the control cluster:
   // - chromeHidden: hide the overlay UI (rail, caption, progress). Persisted;
-  //   long-pressing a clip still toggles it back.
+  //   long-pressing a clip opens the player menu, which brings it back.
   // - fullscreen: device fullscreen + hide the global nav chrome. Not persisted
   //   (re-entering needs a user gesture anyway).
   // - autoScroll: clips do not loop; when one ends the feed advances to the
@@ -191,6 +191,9 @@ export default function ShortsFeed({
   const [chromeHidden, setChromeHidden] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [autoScroll, setAutoScroll] = useState(false);
+  // Playback speed from the player menu. Session-only on purpose: a 2× left
+  // over from an earlier visit would be a surprise.
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [hint, setHint] = useState(false);
   // The view-control cluster is collapsed to a single chevron by default.
   const [controlsOpen, setControlsOpen] = useState(false);
@@ -600,6 +603,9 @@ export default function ShortsFeed({
               onToggleChrome={toggleChrome}
               onToggleFullscreen={toggleFullscreen}
               autoAdvance={autoScroll}
+              onToggleAutoScroll={toggleAutoScroll}
+              playbackRate={playbackRate}
+              onSetPlaybackRate={setPlaybackRate}
               onEnded={() => advanceFrom(short.id)}
               onRemoved={(id) => setItems((prev) => prev.filter((s) => s.id !== id))}
             />
@@ -704,7 +710,7 @@ export default function ShortsFeed({
             </button>
             <button
               onClick={toggleChrome}
-              aria-label={chromeHidden ? "Show overlay" : "Hide overlay"}
+              aria-label={chromeHidden ? "Show overlay" : "Clear display"}
               className={controlBtn}
             >
               {chromeHidden ? <EyeOff size={18} /> : <Eye size={18} />}
@@ -725,7 +731,7 @@ export default function ShortsFeed({
 
       {hint && (
         <div className="pointer-events-none fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/75 px-4 py-2 text-sm font-medium text-white">
-          Long-press a clip to show the controls again
+          Long-press a clip for the menu
         </div>
       )}
     </div>
