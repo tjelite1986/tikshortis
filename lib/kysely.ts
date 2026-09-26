@@ -19,6 +19,7 @@ import {
   type FollowRow,
   type MediaFpRow,
   type ShortDupeDismissalRow,
+  type ShortHideRow,
 } from "./db";
 
 // The table map is built from the row interfaces in db.ts (which are updated
@@ -42,6 +43,7 @@ export interface DB {
   short_poll_failures: ShortPollFailureRow;
   short_media_fp: MediaFpRow;
   short_dupe_dismissals: ShortDupeDismissalRow;
+  short_hides: ShortHideRow;
   follows: FollowRow;
 }
 

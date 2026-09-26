@@ -143,6 +143,9 @@ export interface FeedShort {
   comment_count: number;
   viewer_liked: boolean;
   viewer_saved: boolean;
+  // The viewer marked this clip "Not interested". Only ever true inside the
+  // viewer's own collections; everywhere else a hidden clip is not returned.
+  viewer_hidden: boolean;
   has_poster: boolean;
   // Cache-busting token for the poster URL, derived from the poster file key so
   // it changes whenever the cover frame is replaced. The grid uses it as
@@ -159,6 +162,7 @@ interface FeedRow extends ShortRow {
   comment_count: number;
   viewer_liked: number;
   viewer_saved: number;
+  viewer_hidden: number;
 }
 
 // Compact, stable token for a poster file key (djb2 → base36). Changes whenever
@@ -270,6 +274,9 @@ export function getFeed(
       sql<number>`EXISTS(SELECT 1 FROM short_playlist_items pi JOIN short_playlists pl ON pl.id = pi.playlist_id WHERE pi.short_id = s.id AND pl.user_id = ${viewerId})`.as(
         "viewer_saved"
       ),
+      sql<number>`EXISTS(SELECT 1 FROM short_hides h WHERE h.short_id = s.id AND h.user_id = ${viewerId})`.as(
+        "viewer_hidden"
+      ),
     ])
     .where("s.is_deleted", "=", 0)
     .where("s.status", "=", "ready")
@@ -288,6 +295,15 @@ export function getFeed(
       )
     )
     .$if(mineOnly, (q) => q.where("s.uploader_id", "=", viewerId))
+    // "Not interested": drop what the viewer hid, except from the collections
+    // they built themselves (Liked, a playlist, Mine) — a clip put there on
+    // purpose stays reachable, and the menu row there reads "Show in feed
+    // again". The grids share this query, so a hidden clip leaves them too.
+    .$if(!mineOnly && playlistId === null && sort !== "liked", (q) =>
+      q.where(
+        sql<boolean>`NOT EXISTS(SELECT 1 FROM short_hides h WHERE h.short_id = s.id AND h.user_id = ${viewerId})`
+      )
+    )
     // Dynamic filters: conditional .where() replaces the (@x IS NULL OR ...) trick.
     // Profile/owner scope: a clip belongs to the creator profile (profile_id) OR
     // the person's own uploads (uploader_id) — unioned so a user's uploads show
@@ -413,6 +429,7 @@ export function getFeed(
     comment_count: Number(r.comment_count),
     viewer_liked: Boolean(r.viewer_liked),
     viewer_saved: Boolean(r.viewer_saved),
+    viewer_hidden: Boolean(r.viewer_hidden),
     has_poster: Boolean(r.poster_key),
     poster_v: r.poster_key ? posterVersion(r.poster_key) : null,
     is_private: Boolean(r.is_private),

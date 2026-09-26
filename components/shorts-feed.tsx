@@ -12,6 +12,7 @@ import {
   ChevronDown,
   ChevronsDown,
   ChevronsUp,
+  Undo2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import ShortCard, { type FeedShort } from "@/components/short-card";
@@ -195,6 +196,14 @@ export default function ShortsFeed({
   // over from an earlier visit would be a surprise.
   const [playbackRate, setPlaybackRate] = useState(1);
   const [hint, setHint] = useState(false);
+  // "Not interested" undo: the clip that just left this feed, with the index it
+  // held so Undo can put it back in place. One offer at a time — a new hide
+  // replaces the previous one, and the offer expires on its own.
+  const [undo, setUndo] = useState<{ item: FeedShort; index: number } | null>(null);
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // In the viewer's own collections (Liked, a playlist) the server keeps
+  // returning a hidden clip, so the card stays and only its menu row flips.
+  const hiddenStays = Boolean(playlistId) || mode === "liked";
   // The view-control cluster is collapsed to a single chevron by default.
   const [controlsOpen, setControlsOpen] = useState(false);
 
@@ -465,9 +474,56 @@ export default function ShortsFeed({
   // reset above has already cleared items/cursor for a switch; on first mount
   // the initial cursor may point at a deep-linked focus clip.
   useEffect(() => {
+    setUndo(null);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, length]);
+
+  // A clip was marked "Not interested" (or that was taken back from the row).
+  // Outside the viewer's collections the card leaves and an Undo is offered;
+  // the offer holds the item so Undo needs no refetch.
+  const onHidden = useCallback(
+    (id: number, hidden: boolean) => {
+      if (undoTimer.current) clearTimeout(undoTimer.current);
+      if (!hidden || hiddenStays) {
+        setUndo(null);
+        return;
+      }
+      const index = items.findIndex((s) => s.id === id);
+      if (index === -1) return;
+      setUndo({ item: items[index], index });
+      setItems((prev) => prev.filter((s) => s.id !== id));
+      undoTimer.current = setTimeout(() => setUndo(null), 5000);
+    },
+    [items, hiddenStays]
+  );
+
+  const undoHide = useCallback(async () => {
+    const offer = undo;
+    if (!offer) return;
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    setUndo(null);
+    const res = await fetch(`/api/shorts/${offer.item.id}/hide`, {
+      method: "DELETE",
+    }).catch(() => null);
+    if (!res?.ok) return;
+    // Put the card back where it was and snap to it: the feed has moved on to
+    // the next clip, and a silent reinsert above the viewport would be missed.
+    flushSync(() => {
+      setItems((prev) => {
+        if (prev.some((s) => s.id === offer.item.id)) return prev;
+        const next = [...prev];
+        next.splice(Math.min(offer.index, next.length), 0, {
+          ...offer.item,
+          viewer_hidden: false,
+        });
+        return next;
+      });
+    });
+    containerRef.current
+      ?.querySelector<HTMLElement>(`[data-short-id="${offer.item.id}"]`)
+      ?.scrollIntoView({ block: "start" });
+  }, [undo]);
 
   // Infinite scroll via a sentinel near the end of the list.
   useEffect(() => {
@@ -608,6 +664,7 @@ export default function ShortsFeed({
               onSetPlaybackRate={setPlaybackRate}
               onEnded={() => advanceFrom(short.id)}
               onRemoved={(id) => setItems((prev) => prev.filter((s) => s.id !== id))}
+              onHidden={onHidden}
             />
           </div>
         ))}
@@ -729,6 +786,18 @@ export default function ShortsFeed({
         )}
       </div>
 
+      {undo && (
+        <div className="fixed bottom-20 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-full bg-neutral-900/95 py-2 pl-4 pr-2 text-sm text-white shadow-lg ring-1 ring-white/10">
+          Hidden from your feed
+          <button
+            onClick={undoHide}
+            className="flex items-center gap-1 rounded-full bg-white/10 px-3 py-1 font-semibold transition hover:bg-white/20"
+          >
+            <Undo2 size={14} />
+            Undo
+          </button>
+        </div>
+      )}
       {hint && (
         <div className="pointer-events-none fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/75 px-4 py-2 text-sm font-medium text-white">
           Long-press a clip for the menu

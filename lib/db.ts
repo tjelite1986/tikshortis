@@ -109,6 +109,19 @@ function migrate(db: Database.Database) {
       PRIMARY KEY (short_id, user_id)
     );
 
+    -- "Not interested": clips the viewer asked the feed to stop showing. A row
+    -- hides the clip from every feed and grid except the viewer's own
+    -- collections (Liked, playlists, Mine), where it was put on purpose.
+    CREATE TABLE IF NOT EXISTS short_hides (
+      short_id INTEGER NOT NULL REFERENCES shorts(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (short_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_short_hides_user
+      ON short_hides(user_id, short_id);
+
     CREATE TABLE IF NOT EXISTS short_comments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       short_id INTEGER NOT NULL REFERENCES shorts(id) ON DELETE CASCADE,
@@ -416,6 +429,12 @@ export interface ShortRow {
 }
 
 export interface ShortLikeRow {
+  short_id: number;
+  user_id: number;
+  created_at: string;
+}
+
+export interface ShortHideRow {
   short_id: number;
   user_id: number;
   created_at: string;

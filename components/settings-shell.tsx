@@ -12,6 +12,7 @@ import ShortsCleanup from "@/components/shorts-cleanup";
 import ShortsTitleFetch from "@/components/shorts-title-fetch";
 import ShortsCaptionBackfill from "@/components/shorts-caption-backfill";
 import PlaybackSettings from "@/components/playback-settings";
+import HiddenClipsSettings from "@/components/hidden-clips-settings";
 
 const TABS = [
   { key: "sources", label: "Sources", adminOnly: true },
@@ -34,7 +35,14 @@ function Card({ children }: { children: React.ReactNode }) {
 }
 
 function Panel({ tab, isAdmin }: { tab: TabKey; isAdmin: boolean }) {
-  if (tab === "playback") return <PlaybackSettings />;
+  if (tab === "playback") {
+    return (
+      <div className="flex flex-col gap-6">
+        <PlaybackSettings />
+        <HiddenClipsSettings />
+      </div>
+    );
+  }
   if (tab === "sources") {
     return (
       <div className="flex flex-col gap-6">
