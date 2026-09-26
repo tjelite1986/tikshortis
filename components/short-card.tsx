@@ -32,6 +32,8 @@ import {
   Link2,
   Eye,
   EyeOff,
+  Flag,
+  Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBackDismiss } from "@/lib/use-back-dismiss";
@@ -40,6 +42,7 @@ import PostAvatar from "@/components/post-avatar";
 import LinkifyText from "@/components/linkify-text";
 import ShortsEditSheet from "@/components/shorts-edit-sheet";
 import { CommentsSheet, ShareSheet, SaveSheet } from "@/components/short-sheets";
+import { REPORT_REASONS, REPORT_REASON_LABELS, type ReportReason } from "@/lib/report-reasons";
 
 // Player interaction tuning.
 const SEEK_SECONDS = 10; // double-tap skip distance
@@ -80,6 +83,8 @@ export interface FeedShort {
   viewer_liked: boolean;
   viewer_saved: boolean;
   viewer_hidden: boolean;
+  viewer_reported: boolean;
+  why: string | null;
   has_poster: boolean;
   poster_v: string | null;
   is_private: boolean;
@@ -183,7 +188,8 @@ export default function ShortCard({
   // Called after the viewer marked the clip "Not interested" (hidden=true) or
   // took that back from the same row. The feed decides whether the card
   // leaves: in the viewer's own collections it stays.
-  onHidden?: (id: number, hidden: boolean) => void;
+  // `label` replaces the feed's toast text (a report says so, not just "hidden").
+  onHidden?: (id: number, hidden: boolean, label?: string) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -207,12 +213,19 @@ export default function ShortCard({
   const [showDelete, setShowDelete] = useState(false);
   const [showMore, setShowMore] = useState(false);
   const [hidden, setHidden] = useState(short.viewer_hidden);
+  const [reported, setReported] = useState(short.viewer_reported);
+  const [showReport, setShowReport] = useState(false);
+  const [reportReason, setReportReason] = useState<ReportReason | null>(null);
+  const [reportNote, setReportNote] = useState("");
+  const [showWhy, setShowWhy] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [busyAction, setBusyAction] = useState(false);
   // Device Back closes an open bottom sheet instead of leaving the feed.
   useBackDismiss(showComments, () => setShowComments(false));
   useBackDismiss(showShare, () => setShowShare(false));
   useBackDismiss(showSave, () => setShowSave(false));
+  useBackDismiss(showReport, () => setShowReport(false));
+  useBackDismiss(showWhy, () => setShowWhy(false));
   useBackDismiss(showDelete, () => setShowDelete(false));
   useBackDismiss(showMore, () => setShowMore(false));
   useBackDismiss(showEdit, () => setShowEdit(false));
@@ -440,6 +453,35 @@ export default function ShortCard({
       }
     } catch {
       setHidden(!next);
+      setCoverMsg("Network error");
+      setTimeout(() => setCoverMsg(null), 2500);
+    }
+    setBusyAction(false);
+  };
+
+  // Report (player menu): flag the clip for an admin with a reason and an
+  // optional note. The server also hides it from this viewer's feed, so the
+  // card leaves through the same path as "Not interested" — with its own
+  // toast text, and the same Undo (which unhides; the report stays).
+  const submitReport = async () => {
+    if (busyAction || !reportReason) return;
+    setBusyAction(true);
+    try {
+      const res = await fetch(`/api/shorts/${short.id}/report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: reportReason, note: reportNote.trim() || undefined }),
+      });
+      if (res.ok) {
+        setShowReport(false);
+        setReported(true);
+        setHidden(true);
+        onHidden?.(short.id, true, "Reported and hidden from your feed");
+      } else {
+        setCoverMsg("Could not send the report");
+        setTimeout(() => setCoverMsg(null), 2500);
+      }
+    } catch {
       setCoverMsg("Network error");
       setTimeout(() => setCoverMsg(null), 2500);
     }
@@ -888,6 +930,113 @@ export default function ShortCard({
         </div>
       )}
 
+      {/* "Why this post": the feed's own reason for this clip, as one sentence
+          from the server (it read the same inputs the ranking used). Offers the
+          way out right there, like TikTok's sheet does. */}
+      {showWhy && short.why && (
+        <div
+          className="absolute inset-0 z-20 flex items-end justify-center bg-black/60"
+          onClick={() => setShowWhy(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-t-2xl bg-neutral-900 p-5 pb-8 text-white"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-base font-semibold">Why you&apos;re seeing this</p>
+            <p className="mt-2 text-sm text-white/80">{short.why}</p>
+            <p className="mt-3 text-xs text-white/50">
+              Not what you want? Mark it Not interested and the feed stops showing
+              it. Liking and following shape For You.
+            </p>
+            <div className="mt-4 flex gap-3">
+              {!hidden && (
+                <button
+                  onClick={() => {
+                    setShowWhy(false);
+                    toggleHidden();
+                  }}
+                  disabled={busyAction}
+                  className="flex-1 rounded-full bg-white/10 py-2.5 text-sm font-semibold transition active:scale-95 disabled:opacity-50"
+                >
+                  Not interested
+                </button>
+              )}
+              <button
+                onClick={() => setShowWhy(false)}
+                className="flex-1 rounded-full bg-white py-2.5 text-sm font-semibold text-black transition active:scale-95"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Report sheet: a reason list and an optional note. A second report on
+          the same clip replaces the first, so "Reported" reopens the same form. */}
+      {showReport && (
+        <div
+          className="absolute inset-0 z-20 flex items-end justify-center bg-black/60"
+          onClick={() => setShowReport(false)}
+        >
+          <div
+            className="max-h-[85%] w-full max-w-md overflow-y-auto rounded-t-2xl bg-neutral-900 p-5 pb-8 text-white"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-base font-semibold">
+              {reported ? "Update your report" : "Report this clip"}
+            </p>
+            <p className="mt-1 text-sm text-white/60">
+              An admin will look at it. The clip leaves your feed right away.
+            </p>
+            <div className="mt-4 flex flex-col gap-1">
+              {REPORT_REASONS.map((reason) => (
+                <button
+                  key={reason}
+                  onClick={() => setReportReason(reason)}
+                  className={cn(
+                    "flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition",
+                    reportReason === reason ? "bg-white/15" : "hover:bg-white/5"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "h-4 w-4 shrink-0 rounded-full border",
+                      reportReason === reason
+                        ? "border-rose-500 bg-rose-500"
+                        : "border-white/40"
+                    )}
+                  />
+                  {REPORT_REASON_LABELS[reason]}
+                </button>
+              ))}
+            </div>
+            <textarea
+              value={reportNote}
+              onChange={(e) => setReportNote(e.target.value.slice(0, 500))}
+              placeholder="Anything the admin should know (optional)"
+              rows={2}
+              className="mt-3 w-full resize-none rounded-xl bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/40 focus:outline-none focus:ring-1 focus:ring-white/30"
+            />
+            <div className="mt-4 flex gap-3">
+              <button
+                onClick={submitReport}
+                disabled={busyAction || !reportReason}
+                className="flex-1 rounded-full bg-rose-500 py-2.5 text-sm font-semibold transition active:scale-95 disabled:opacity-50"
+              >
+                {reported ? "Update report" : "Send report"}
+              </button>
+              <button
+                onClick={() => setShowReport(false)}
+                className="flex-1 rounded-full bg-white/10 py-2.5 text-sm font-semibold transition active:scale-95"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showDelete && (
         <div
           className="absolute inset-0 z-20 flex items-end justify-center bg-black/60"
@@ -944,6 +1093,24 @@ export default function ShortCard({
               onClick={() => {
                 setShowMore(false);
                 toggleHidden();
+              }}
+            />
+            {short.why && (
+              <MoreRow
+                icon={<Info size={18} />}
+                label="Why this post"
+                onClick={() => {
+                  setShowMore(false);
+                  setShowWhy(true);
+                }}
+              />
+            )}
+            <MoreRow
+              icon={<Flag size={18} />}
+              label={reported ? "Reported" : "Report"}
+              onClick={() => {
+                setShowMore(false);
+                setShowReport(true);
               }}
             />
             <div className="my-1 border-t border-white/10" />

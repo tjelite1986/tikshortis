@@ -146,6 +146,12 @@ export interface FeedShort {
   // The viewer marked this clip "Not interested". Only ever true inside the
   // viewer's own collections; everywhere else a hidden clip is not returned.
   viewer_hidden: boolean;
+  // The viewer has an open report on this clip (the menu row reads "Reported").
+  viewer_reported: boolean;
+  // "Why this post": one sentence on why the feed put this clip here — the
+  // ordering mode's own criterion, or the follow/like/save that pulled it in.
+  // Null when the view itself is the reason (a profile page, a person page).
+  why: string | null;
   has_poster: boolean;
   // Cache-busting token for the poster URL, derived from the poster file key so
   // it changes whenever the cover frame is replaced. The grid uses it as
@@ -163,6 +169,7 @@ interface FeedRow extends ShortRow {
   viewer_liked: number;
   viewer_saved: number;
   viewer_hidden: number;
+  viewer_reported: number;
 }
 
 // Compact, stable token for a poster file key (djb2 → base36). Changes whenever
@@ -172,6 +179,82 @@ function posterVersion(key: string): string {
   let h = 5381;
   for (let i = 0; i < key.length; i++) h = ((h << 5) + h + key.charCodeAt(i)) | 0;
   return (h >>> 0).toString(36);
+}
+
+// "Added today" / "yesterday" / "3 days ago" / "2 weeks ago" / "on 2026-03-12":
+// the age of a clip in the words a viewer would use. Anything older than a
+// season gets its date — "9 months ago" reads as an excuse, a date as a fact.
+function addedWhen(createdAt: string, now: Date): string {
+  const then = new Date(createdAt.includes("T") ? createdAt : createdAt.replace(" ", "T") + "Z");
+  const days = Math.floor((now.getTime() - then.getTime()) / 86_400_000);
+  if (!Number.isFinite(days) || days < 0) return "just now";
+  if (days === 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 14) return `${days} days ago`;
+  if (days < 60) return `${Math.floor(days / 7)} weeks ago`;
+  if (days < 120) return `${Math.floor(days / 30)} months ago`;
+  return `on ${then.toISOString().slice(0, 10)}`;
+}
+
+// "Why this post": the sentence behind one clip's place in the feed. It reads
+// the same inputs the query ordered by, so it can never claim a reason the
+// ranking did not use — a followed creator in For You, the like and comment
+// counts the score weighs, the shuffle when nothing else lifted the clip, the
+// age in Newest. A scoped view (profile, person, mention) is its own
+// explanation and gets null; the menu row is not shown there.
+function feedReason(
+  r: FeedRow,
+  ctx: {
+    sort: ShortsSort;
+    tag: string | null;
+    scoped: boolean;
+    playlistId: number | null;
+    mineOnly: boolean;
+    followScope: { profileIds: number[]; userIds: number[] };
+    now: Date;
+  }
+): string | null {
+  if (ctx.mineOnly) return "One of your own uploads.";
+  if (ctx.playlistId !== null) return "You saved it to this playlist.";
+  if (ctx.sort === "liked") return "You liked it.";
+  if (ctx.scoped) return null;
+  const creator = r.profile_name ?? r.uploader_name;
+  const followed =
+    (r.profile_id !== null && ctx.followScope.profileIds.includes(r.profile_id)) ||
+    (r.uploader_id !== null && ctx.followScope.userIds.includes(r.uploader_id));
+  const fromFollowed = creator
+    ? `From ${creator}, who you follow.`
+    : "From a creator you follow.";
+  if (ctx.sort === "following") return fromFollowed;
+  const added = addedWhen(r.created_at, ctx.now);
+  if (ctx.tag !== null) {
+    return followed
+      ? `Tagged #${ctx.tag}, from ${creator ?? "a creator"} who you follow.`
+      : `Tagged #${ctx.tag}, added ${added}.`;
+  }
+  if (ctx.sort === "random") {
+    return followed
+      ? `A shuffled pick from ${creator ?? "a creator"} you follow.`
+      : "A shuffled pick from the whole library.";
+  }
+  if (ctx.sort === "foryou") {
+    if (followed) return fromFollowed;
+    const likes = Number(r.like_count);
+    const comments = Number(r.comment_count);
+    if (likes >= 1) {
+      return `Popular here: ${likes} ${likes === 1 ? "like" : "likes"}${
+        comments ? ` and ${comments} ${comments === 1 ? "comment" : "comments"}` : ""
+      }.`;
+    }
+    if (comments >= 1) {
+      return `People are talking about it: ${comments} ${comments === 1 ? "comment" : "comments"}.`;
+    }
+    return "A fresh pick mixed in so the feed is not only the popular clips.";
+  }
+  // "new": the newest first, nothing else weighed.
+  return followed
+    ? `From ${creator ?? "a creator"} you follow, added ${added}.`
+    : `Added ${added}; this feed shows the newest first.`;
 }
 
 // Cursor-paginated feed, newest first. The cursor is the last short id seen (ids
@@ -229,10 +312,17 @@ export function getFeed(
   const profIds = profileId !== null ? [profileId, ...profileIds] : [...profileIds];
   const ownIds = ownerId !== null ? [ownerId, ...ownerIds] : [...ownerIds];
   const mentIds = [...mentionedIds];
+  // The view is its own explanation when it is scoped to a person, a profile, a
+  // playlist or the viewer's uploads; "Why this post" then stays quiet.
+  const scoped =
+    profIds.length > 0 || ownIds.length > 0 || mentIds.length > 0;
   // Following scope resolved once (only when needed) — the followed profile +
   // uploader ids for this viewer on this channel, expanded via the person graph.
+  // The library-wide feeds resolve it too, so "Why this post" can name a
+  // followed creator; a scoped view does not, since it never mentions follows.
   const followScope =
-    sort === "following"
+    sort === "following" ||
+    (!scoped && playlistId === null && !mineOnly && sort !== "liked")
       ? followedShortsScope(viewerId)
       : { profileIds: [] as number[], userIds: [] as number[] };
   // Structure (joins, filters, ordering, pagination) is built with the typed
@@ -276,6 +366,9 @@ export function getFeed(
       ),
       sql<number>`EXISTS(SELECT 1 FROM short_hides h WHERE h.short_id = s.id AND h.user_id = ${viewerId})`.as(
         "viewer_hidden"
+      ),
+      sql<number>`EXISTS(SELECT 1 FROM short_reports rp WHERE rp.short_id = s.id AND rp.user_id = ${viewerId} AND rp.resolved_at IS NULL)`.as(
+        "viewer_reported"
       ),
     ])
     .where("s.is_deleted", "=", 0)
@@ -403,6 +496,7 @@ export function getFeed(
     .limit(limit + 1);
 
   const rows = getAll<FeedRow>(query);
+  const now = new Date();
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
@@ -430,6 +524,16 @@ export function getFeed(
     viewer_liked: Boolean(r.viewer_liked),
     viewer_saved: Boolean(r.viewer_saved),
     viewer_hidden: Boolean(r.viewer_hidden),
+    viewer_reported: Boolean(r.viewer_reported),
+    why: feedReason(r, {
+      sort,
+      tag,
+      scoped,
+      playlistId,
+      mineOnly,
+      followScope,
+      now,
+    }),
     has_poster: Boolean(r.poster_key),
     poster_v: r.poster_key ? posterVersion(r.poster_key) : null,
     is_private: Boolean(r.is_private),

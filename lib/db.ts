@@ -122,6 +122,25 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_short_hides_user
       ON short_hides(user_id, short_id);
 
+    -- Report: a viewer flagging a clip for an admin to look at. One row per
+    -- viewer and clip (a second report from the same viewer replaces the
+    -- first); an admin dismissing the clip's reports stamps resolved_at.
+    -- Reporting also writes a short_hides row, so the clip leaves the
+    -- reporter's own feed at once.
+    CREATE TABLE IF NOT EXISTS short_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      short_id INTEGER NOT NULL REFERENCES shorts(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      resolved_at TEXT,
+      UNIQUE (short_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_short_reports_open
+      ON short_reports(resolved_at, short_id);
+
     CREATE TABLE IF NOT EXISTS short_comments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       short_id INTEGER NOT NULL REFERENCES shorts(id) ON DELETE CASCADE,
@@ -438,6 +457,16 @@ export interface ShortHideRow {
   short_id: number;
   user_id: number;
   created_at: string;
+}
+
+export interface ShortReportRow {
+  id: number;
+  short_id: number;
+  user_id: number;
+  reason: string;
+  note: string | null;
+  created_at: string;
+  resolved_at: string | null;
 }
 
 export interface ShortCommentRow {

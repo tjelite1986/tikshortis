@@ -13,6 +13,7 @@ import ShortsTitleFetch from "@/components/shorts-title-fetch";
 import ShortsCaptionBackfill from "@/components/shorts-caption-backfill";
 import PlaybackSettings from "@/components/playback-settings";
 import HiddenClipsSettings from "@/components/hidden-clips-settings";
+import ShortsReports from "@/components/shorts-reports";
 
 const TABS = [
   { key: "sources", label: "Sources", adminOnly: true },
@@ -20,6 +21,7 @@ const TABS = [
   { key: "duplicates", label: "Duplicates", adminOnly: false },
   { key: "cleaning", label: "Cleaning", adminOnly: false },
   { key: "titles", label: "Titles", adminOnly: true },
+  { key: "reports", label: "Reports", adminOnly: true },
   // Per-device viewer preferences: the one tab that needs no permission.
   { key: "playback", label: "Playback", adminOnly: false },
 ] as const;
@@ -79,6 +81,7 @@ function Panel({ tab, isAdmin }: { tab: TabKey; isAdmin: boolean }) {
     );
   }
   if (tab === "duplicates") return <ShortsDuplicates />;
+  if (tab === "reports" && isAdmin) return <ShortsReports />;
   if (tab === "cleaning") return <ShortsCleanup />;
   if (tab === "titles" && isAdmin) {
     return (

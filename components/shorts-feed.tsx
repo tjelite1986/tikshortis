@@ -199,7 +199,12 @@ export default function ShortsFeed({
   // "Not interested" undo: the clip that just left this feed, with the index it
   // held so Undo can put it back in place. One offer at a time — a new hide
   // replaces the previous one, and the offer expires on its own.
-  const [undo, setUndo] = useState<{ item: FeedShort; index: number } | null>(null);
+  const [undo, setUndo] = useState<{
+    item: FeedShort;
+    index: number;
+    // Toast text; a report names itself, a plain hide says "Hidden from your feed".
+    label: string;
+  } | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // In the viewer's own collections (Liked, a playlist) the server keeps
   // returning a hidden clip, so the card stays and only its menu row flips.
@@ -483,7 +488,7 @@ export default function ShortsFeed({
   // Outside the viewer's collections the card leaves and an Undo is offered;
   // the offer holds the item so Undo needs no refetch.
   const onHidden = useCallback(
-    (id: number, hidden: boolean) => {
+    (id: number, hidden: boolean, label = "Hidden from your feed") => {
       if (undoTimer.current) clearTimeout(undoTimer.current);
       if (!hidden || hiddenStays) {
         setUndo(null);
@@ -491,7 +496,7 @@ export default function ShortsFeed({
       }
       const index = items.findIndex((s) => s.id === id);
       if (index === -1) return;
-      setUndo({ item: items[index], index });
+      setUndo({ item: items[index], index, label });
       setItems((prev) => prev.filter((s) => s.id !== id));
       undoTimer.current = setTimeout(() => setUndo(null), 5000);
     },
@@ -788,7 +793,7 @@ export default function ShortsFeed({
 
       {undo && (
         <div className="fixed bottom-20 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-full bg-neutral-900/95 py-2 pl-4 pr-2 text-sm text-white shadow-lg ring-1 ring-white/10">
-          Hidden from your feed
+          {undo.label}
           <button
             onClick={undoHide}
             className="flex items-center gap-1 rounded-full bg-white/10 px-3 py-1 font-semibold transition hover:bg-white/20"
