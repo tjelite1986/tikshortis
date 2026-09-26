@@ -70,12 +70,10 @@ export default function BottomNav({
     { label: "Analysis", href: "/analysis", icon: Sparkles },
     { label: "Mine", href: "/mine", icon: Clapperboard },
     { label: "Upload", href: "/upload", icon: Upload },
-    ...(isAdmin
-      ? [
-          { label: "Grab", href: "/grab", icon: Download },
-          { label: "Settings", href: "/settings", icon: Settings },
-        ]
-      : []),
+    ...(isAdmin ? [{ label: "Grab", href: "/grab", icon: Download }] : []),
+    // Playback preferences live here, so every viewer gets the door; the
+    // admin tools inside stay behind their permission.
+    { label: "Settings", href: "/settings", icon: Settings },
   ];
 
   // The immersive feed is exactly one viewport tall; bottom padding under it

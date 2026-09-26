@@ -2,12 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Volume2, VolumeX } from "lucide-react";
+import { isAutoplayBlocked } from "@/components/use-sound-preference";
 
 /**
  * A clip that plays where it stands, used by the shorts grid at one per row.
  *
  * Autoplay rules that browsers actually enforce: a clip may only start on its
- * own while muted, so it starts muted and the viewer unmutes. Only one clip
+ * own with sound once the viewer has touched the page, so when the preference
+ * asks for sound and the browser says no, the clip falls back to muted and
+ * reports it (see useSoundPreference for what happens next). Only one clip
  * plays at a time — a scrolling list of simultaneously playing videos is both
  * unusable and a bandwidth fire — which is what the module-level `playing`
  * holds: the pause is issued by whichever clip takes over, so it works across
@@ -20,12 +23,15 @@ export default function ShortsInlineClip({
   poster,
   muted,
   onMuteChange,
+  onSoundBlocked,
 }: {
   id: number;
   poster: string | null;
   // Shared across the list: unmuting one clip keeps the next one audible.
   muted: boolean;
   onMuteChange: (muted: boolean) => void;
+  // The browser refused to start this clip with sound; it is playing muted.
+  onSoundBlocked?: () => void;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   // Whether this clip is the one in view. Drives both the playback and the
@@ -44,9 +50,15 @@ export default function ShortsInlineClip({
         if (inView) {
           if (playing && playing !== el) playing.pause();
           playing = el;
-          // Rejects when autoplay is blocked or the codec is missing; the
-          // poster stays up, which is the right fallback either way.
-          void el.play().catch(() => {});
+          // Rejects when autoplay is blocked or the codec is missing. Only
+          // the sound gate is worth a muted retry; otherwise the poster stays
+          // up, which is the right fallback.
+          void el.play().catch((err: unknown) => {
+            if (el.muted || !isAutoplayBlocked(err)) return;
+            el.muted = true;
+            void el.play().catch(() => {});
+            onSoundBlocked?.();
+          });
         } else {
           el.pause();
           if (playing === el) playing = null;
@@ -59,7 +71,7 @@ export default function ShortsInlineClip({
       io.disconnect();
       if (playing === el) playing = null;
     };
-  }, []);
+  }, [onSoundBlocked]);
 
   return (
     <>
@@ -77,6 +89,7 @@ export default function ShortsInlineClip({
         preload="none"
       />
       <button
+        data-sound-toggle
         onClick={(e) => {
           // The tile is a link into the immersive feed; muting is not a tap
           // on the clip.

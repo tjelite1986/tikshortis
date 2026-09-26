@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSoundPreference } from "@/components/use-sound-preference";
 import { flushSync } from "react-dom";
 import Link from "next/link";
 import {
@@ -178,7 +179,8 @@ export default function ShortsFeed({
   // race each other (state, not a ref: the top sentinel re-arms on re-render).
   const [focusJumped, setFocusJumped] = useState(!effectiveFocus);
   const [activeId, setActiveId] = useState<number | null>(null);
-  const [muted, setMuted] = useState(true);
+  // Seeded from Settings > Playback; see the hook for the autoplay fallback.
+  const { muted, toggleMuted, soundBlocked } = useSoundPreference();
   // Three independent toggles, each with its own button in the control cluster:
   // - chromeHidden: hide the overlay UI (rail, caption, progress). Persisted;
   //   long-pressing a clip still toggles it back.
@@ -590,7 +592,8 @@ export default function ShortsFeed({
               short={short}
               active={activeId === short.id}
               muted={muted}
-              onToggleMuted={() => setMuted((m) => !m)}
+              onToggleMuted={toggleMuted}
+              onSoundBlocked={soundBlocked}
               viewerId={viewerId}
               isAdmin={isAdmin}
               chromeHidden={chromeHidden}

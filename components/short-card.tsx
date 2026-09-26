@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { isAutoplayBlocked } from "@/components/use-sound-preference";
 import Link from "next/link";
 import {
   Heart,
@@ -132,6 +133,7 @@ export default function ShortCard({
   active,
   muted,
   onToggleMuted,
+  onSoundBlocked,
   viewerId,
   isAdmin = false,
   chromeHidden = false,
@@ -145,6 +147,8 @@ export default function ShortCard({
   active: boolean;
   muted: boolean;
   onToggleMuted: () => void;
+  // The browser refused to start this clip with sound; it is playing muted.
+  onSoundBlocked?: () => void;
   // The current user's id, to decide if they own this clip (visibility toggle).
   viewerId: number;
   // Admins get a "Cover" button to set the thumbnail from the current frame.
@@ -393,16 +397,28 @@ export default function ShortCard({
 
   // Drive playback from the active flag: the in-view card plays, all others
   // pause and rewind so they restart cleanly when scrolled back to.
+  // `v.muted` is kept current by the effect below, so it is read from the
+  // element rather than listed as a dependency: a mute toggle must not restart
+  // a clip the viewer paused.
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    if (active) {
-      v.play().catch(() => {/* autoplay can be blocked until interaction */});
-    } else {
+    if (!active) {
       v.pause();
       v.currentTime = 0;
+      return;
     }
-  }, [active]);
+    v.play().catch((err: unknown) => {
+      // Sound before the viewer has touched the page is the one thing a
+      // browser refuses; play muted instead and let the feed know. Anything
+      // else (a codec the device lacks, a play() interrupted by pause()) is
+      // not ours to retry.
+      if (v.muted || !isAutoplayBlocked(err)) return;
+      v.muted = true;
+      v.play().catch(() => {});
+      onSoundBlocked?.();
+    });
+  }, [active, onSoundBlocked]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -709,6 +725,7 @@ export default function ShortCard({
           icon={muted ? <VolumeX size={22} /> : <Volume2 size={22} />}
           label={muted ? "Muted" : "Sound"}
           onClick={onToggleMuted}
+          soundToggle
         />
         <RailButton
           icon={<MoreVertical size={22} />}
@@ -962,14 +979,18 @@ function RailButton({
   icon,
   label,
   onClick,
+  soundToggle = false,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
+  // Marks the speaker button for useSoundPreference's restore listener.
+  soundToggle?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      data-sound-toggle={soundToggle ? "" : undefined}
       className="flex flex-col items-center gap-0.5 transition active:scale-90"
     >
       <span className="drop-shadow-lg">{icon}</span>
