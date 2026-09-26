@@ -392,8 +392,32 @@ function migrate(db: Database.Database) {
   `);
 }
 
-export const db = globalForDb.db ?? createDb();
-if (process.env.NODE_ENV !== "production") globalForDb.db = db;
+// Opened on FIRST USE, not at import. `next build` collects page data by
+// importing every route module in parallel workers; with the connection opened
+// here at module level each worker ran the migration's BEGIN IMMEDIATE against
+// the same fresh file, and one of them lost the race with SQLITE_BUSY even
+// under busy_timeout ("Failed to collect page data for /api/shorts/[id]/poster",
+// 2026-09-26). No route runs a query at build time (all are force-dynamic), so
+// deferring the open keeps the build off the database entirely. Call sites are
+// unchanged: the proxy forwards every property and binds methods to the real
+// connection, so `db.prepare(...)`, `db.transaction(...)` and `db.pragma(...)`
+// read exactly as before.
+let connection: Database.Database | null = null;
+function getDb(): Database.Database {
+  if (!connection) {
+    connection = globalForDb.db ?? createDb();
+    if (process.env.NODE_ENV !== "production") globalForDb.db = connection;
+  }
+  return connection;
+}
+
+export const db = new Proxy({} as Database.Database, {
+  get(_target, prop) {
+    const real = getDb();
+    const value = Reflect.get(real, prop, real);
+    return typeof value === "function" ? value.bind(real) : value;
+  },
+});
 
 // --- Row types ---
 
