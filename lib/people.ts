@@ -1,4 +1,7 @@
 import { db } from "./db";
+import { handleOf } from "./handle";
+
+export { handleOf };
 
 /**
  * Who a handle refers to.
@@ -11,22 +14,6 @@ import { db } from "./db";
  * `short_profile_aliases`, written when an admin merges two handles for the same
  * creator into one profile.
  */
-
-// Stored names are display-ish (imports keep the creator's own capitalisation
-// and punctuation), so every comparison runs through this.
-export function handleOf(name: string): string {
-  return String(name)
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._]+/g, "")
-    .replace(/^[._]+|[._]+$/g, "");
-}
-
-// Registered as a SQL function so SQLite can filter on the normalised form
-// without materialising every profile row in JS.
-db.function("norm_handle", { deterministic: true }, (s: unknown) =>
-  handleOf(String(s ?? ""))
-);
 
 /**
  * Every handle that resolves to the same creator: the one asked for, plus each

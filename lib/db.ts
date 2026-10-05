@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync } from "fs";
 import path from "path";
+import { handleOf } from "./handle";
 
 // Resolve the data directory (mounted as a named volume in Docker).
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
@@ -23,6 +24,12 @@ function createDb(): Database.Database {
   db.pragma("busy_timeout = 30000");
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  // Registered on the connection rather than at import of lib/people: a
+  // top-level db.function() opened the database while `next build` collected
+  // page data, which is the SQLITE_BUSY race the lazy proxy below exists to avoid.
+  db.function("norm_handle", { deterministic: true }, (s: unknown) =>
+    handleOf(String(s ?? ""))
+  );
   // Serialize the write side of startup across processes: `next build` collects
   // page data in several workers, each opening this file, and PRAGMA table_info
   // followed by ALTER TABLE is not atomic between them.
