@@ -1,5 +1,6 @@
 import Link from "next/link";
 import ShortsGrid from "@/components/shorts-grid";
+import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,7 @@ export default async function ShortsTagPage(props: {
   params: Promise<{ tag: string }>;
 }) {
   const { tag: raw } = await props.params;
+  const session = await getSession();
   const tag = decodeURIComponent(raw).replace(/^#/, "").replace(/[^\p{L}\p{N}_]/gu, "");
   return (
     <div className="mx-auto max-w-5xl px-2 pb-24 pt-6">
@@ -23,6 +25,7 @@ export default async function ShortsTagPage(props: {
         query={{ channel: "main", tag }}
         hrefPrefix={`/?tag=${encodeURIComponent(tag)}&focus=`}
         empty="No clips with this hashtag yet."
+        isAdmin={session?.role === "admin"}
       />
     </div>
   );

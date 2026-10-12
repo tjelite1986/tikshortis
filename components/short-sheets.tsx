@@ -27,6 +27,8 @@ export function CommentsSheet({
   const [comments, setComments] = useState<Comment[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`/api/shorts/${shortId}/comments`)
@@ -39,25 +41,33 @@ export function CommentsSheet({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const body = input.trim();
-    if (!body) return;
-    setInput("");
+    if (!body || sending) return;
+    setSending(true);
+    setError(null);
+    // The text stays in the field until the server has it: a failed post must
+    // not silently eat what the viewer typed.
     try {
       const res = await fetch(`/api/shorts/${shortId}/comments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ body }),
       });
-      if (res.ok) {
-        const d = await res.json();
-        // Update the parent outside the updater: React may run an updater
-        // during render (twice in StrictMode), and a setState on another
-        // component from there is a warning at best and a double count at worst.
-        const next = [...comments, d.comment];
-        setComments(next);
-        onCountChange(next.length);
+      if (!res.ok) {
+        setError(res.status === 401 ? "Signed out — sign in again to comment." : "Could not post.");
+        return;
       }
+      const d = await res.json();
+      // Update the parent outside the updater: React may run an updater
+      // during render (twice in StrictMode), and a setState on another
+      // component from there is a warning at best and a double count at worst.
+      const next = [...comments, d.comment];
+      setComments(next);
+      onCountChange(next.length);
+      setInput("");
     } catch {
-      /* ignore */
+      setError("Could not post.");
+    } finally {
+      setSending(false);
     }
   };
 
@@ -87,6 +97,11 @@ export function CommentsSheet({
             </div>
           ))}
         </div>
+        {error && (
+          <p role="alert" className="px-4 pb-1 text-xs text-rose-400">
+            {error}
+          </p>
+        )}
         <form
           onSubmit={submit}
           className="flex items-center gap-2 border-t border-white/10 p-3"
@@ -100,7 +115,8 @@ export function CommentsSheet({
           <button
             type="submit"
             aria-label="Post comment"
-            className="rounded-full bg-rose-500 p-2 transition active:scale-90"
+            disabled={sending}
+            className="rounded-full bg-rose-500 p-2 transition active:scale-90 disabled:opacity-50"
           >
             <Send size={18} />
           </button>
@@ -130,8 +146,10 @@ export function ShareSheet({
       try {
         await navigator.share({ url });
         return;
-      } catch {
-        /* dismissed — fall through to copy */
+      } catch (err) {
+        // The viewer closed the share sheet: nothing was shared and nothing
+        // should claim to be. Any other failure falls through to the clipboard.
+        if (err instanceof DOMException && err.name === "AbortError") return;
       }
     }
     try {
@@ -213,14 +231,25 @@ export function SaveSheet({
         ? { ...x, contains: inIt ? 0 : 1, item_count: x.item_count + (inIt ? -1 : 1) }
         : x
     );
+    const before = playlists;
     setPlaylists(next);
     // The bookmark is yellow whenever the clip is in at least one playlist.
     onSavedChange(next.some((x) => !!x.contains));
-    await fetch(`/api/shorts/playlists/${p.id}/items` + (inIt ? `?short=${shortId}` : ""), {
-      method: inIt ? "DELETE" : "POST",
-      headers: { "Content-Type": "application/json" },
-      body: inIt ? undefined : JSON.stringify({ shortId }),
-    });
+    try {
+      const res = await fetch(
+        `/api/shorts/playlists/${p.id}/items` + (inIt ? `?short=${shortId}` : ""),
+        {
+          method: inIt ? "DELETE" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: inIt ? undefined : JSON.stringify({ shortId }),
+        }
+      );
+      if (!res.ok) throw new Error(String(res.status));
+    } catch {
+      // Put the sheet back the way the server still has it.
+      setPlaylists(before);
+      onSavedChange(before.some((x) => !!x.contains));
+    }
   };
 
   const createAndAdd = async (e: React.FormEvent) => {

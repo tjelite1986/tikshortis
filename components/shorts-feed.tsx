@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSoundPreference } from "@/components/use-sound-preference";
 import { flushSync } from "react-dom";
 import Link from "next/link";
@@ -16,6 +16,10 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import ShortCard, { type FeedShort } from "@/components/short-card";
+
+// How many cards on either side of the active one keep a loaded <video>.
+// Two covers a fast swipe in either direction without a visible stall.
+const NEAR_CARDS = 2;
 
 // Feed ordering modes for the top-center selector (matches lib/shorts
 // parseShortsSort). "For You" reshuffles per visit via a client seed.
@@ -168,6 +172,9 @@ export default function ShortsFeed({
   );
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
+  // The last page request failed and nothing is on screen: shown instead of
+  // the "no clips yet" invitation, which is for an empty library, not an outage.
+  const [loadError, setLoadError] = useState(false);
   // Backward pagination: clips NEWER than the top of the list, so a feed opened
   // mid-list from a grid tile can scroll up past its starting clip.
   const [prevCursor, setPrevCursor] = useState<number | null>(
@@ -180,6 +187,12 @@ export default function ShortsFeed({
   // race each other (state, not a ref: the top sentinel re-arms on re-render).
   const [focusJumped, setFocusJumped] = useState(!effectiveFocus);
   const [activeId, setActiveId] = useState<number | null>(null);
+  // Cards this far from the active one keep their video loaded; the rest
+  // hold only a poster. Before the first card is known, the top of the list.
+  const activeIndex = useMemo(() => {
+    const i = items.findIndex((s) => s.id === activeId);
+    return i === -1 ? 0 : i;
+  }, [items, activeId]);
   // Seeded from Settings > Playback; see the hook for the autoplay fallback.
   const { muted, toggleMuted, soundBlocked } = useSoundPreference();
   // Three independent toggles, each with its own button in the control cluster:
@@ -318,6 +331,7 @@ export default function ShortsFeed({
         setCursor(data.nextCursor);
         setHasMore(data.nextCursor !== null);
         failuresRef.current = 0;
+        setLoadError(false);
       } else if (!res.ok) {
         failed = true;
       }
@@ -329,6 +343,7 @@ export default function ShortsFeed({
       // API at round-trip speed.
       if (failed) {
         failuresRef.current += 1;
+        if (loadTokenRef.current === token) setLoadError(true);
         await new Promise((r) => setTimeout(r, Math.min(30_000, 1_000 * 2 ** failuresRef.current)));
       }
       // Only the most recent load clears the flag — a stale load (superseded by
@@ -650,11 +665,13 @@ export default function ShortsFeed({
         className="h-full w-full snap-y snap-mandatory overflow-y-scroll overscroll-y-contain [overflow-anchor:none]"
       >
         <div ref={topSentinelRef} className="h-px w-full" />
-        {items.map((short) => (
+        {items.map((short, i) => (
           <div key={short.id} data-short-id={short.id} className="h-full w-full">
             <ShortCard
               short={short}
               active={activeId === short.id}
+              near={Math.abs(i - activeIndex) <= NEAR_CARDS}
+              next={i === activeIndex + 1}
               muted={muted}
               onToggleMuted={toggleMuted}
               onSoundBlocked={soundBlocked}
@@ -676,7 +693,33 @@ export default function ShortsFeed({
 
         <div ref={sentinelRef} className="h-1 w-full" />
 
-        {!loading && items.length === 0 && (
+        {items.length === 0 && loadError && (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-white/60">
+            <p>Could not load the feed.</p>
+            <button
+              type="button"
+              onClick={() => {
+                failuresRef.current = 0;
+                load();
+              }}
+              disabled={loading}
+              className="rounded-full bg-white/10 px-5 py-2 text-sm font-semibold text-white ring-1 ring-white/20 disabled:opacity-50"
+            >
+              {loading ? "Retrying…" : "Try again"}
+            </button>
+          </div>
+        )}
+
+        {items.length === 0 && !loadError && loading && (
+          <div className="flex h-full items-center justify-center">
+            <div
+              aria-label="Loading"
+              className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white/80"
+            />
+          </div>
+        )}
+
+        {!loading && !loadError && items.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-white/60">
             <p>No clips yet.</p>
             <Link

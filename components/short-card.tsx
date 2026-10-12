@@ -143,6 +143,8 @@ function personHandle(name: string): string {
 export default function ShortCard({
   short,
   active,
+  near = true,
+  next = false,
   muted,
   onToggleMuted,
   onSoundBlocked,
@@ -161,6 +163,13 @@ export default function ShortCard({
 }: {
   short: FeedShort;
   active: boolean;
+  // Within a couple of cards of the active one: the <video> keeps its source.
+  // Further away it is unloaded, because every card in the feed stays mounted
+  // and a few hundred media elements with a source each exhaust memory on
+  // desktop and hit iOS Safari's cap, after which later clips never start.
+  near?: boolean;
+  // The card right after the active one: buffer ahead so the swipe is instant.
+  next?: boolean;
   muted: boolean;
   onToggleMuted: () => void;
   // The browser refused to start this clip with sound; it is playing muted.
@@ -521,7 +530,7 @@ export default function ShortCard({
     if (!v) return;
     if (!active) {
       v.pause();
-      v.currentTime = 0;
+      if (v.readyState > 0) v.currentTime = 0;
       return;
     }
     v.play().catch((err: unknown) => {
@@ -536,6 +545,16 @@ export default function ShortCard({
     });
   }, [active, onSoundBlocked]);
 
+  // Dropping `src` alone leaves the decoded media in the element; load() with
+  // no source is what releases it. The attribute itself is controlled below.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || near) return;
+    v.pause();
+    v.load();
+    setProgress(0);
+  }, [near]);
+
   useEffect(() => {
     const v = videoRef.current;
     if (v) v.muted = muted;
@@ -546,20 +565,22 @@ export default function ShortCard({
       triggerBurst();
       return;
     }
-    // Optimistic update.
+    // Optimistic update, taken back if the server did not record it: a heart
+    // that "took" and vanishes on reload is worse than one that never lit.
+    const prevLiked = liked;
     const next = !liked;
     setLiked(next);
     setLikeCount((c) => c + (next ? 1 : -1));
     if (next) triggerBurst();
     try {
       const res = await fetch(`/api/shorts/${short.id}/like`, { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        setLiked(data.liked);
-        setLikeCount(data.like_count);
-      }
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json();
+      setLiked(data.liked);
+      setLikeCount(data.like_count);
     } catch {
-      /* keep optimistic state */
+      setLiked(prevLiked);
+      setLikeCount((c) => c + (next ? -1 : 1));
     }
   };
 
@@ -640,14 +661,14 @@ export default function ShortCard({
       {/* Video */}
       <video
         ref={videoRef}
-        src={`/api/shorts/${short.id}/video`}
+        src={near ? `/api/shorts/${short.id}/video` : undefined}
         poster={short.has_poster ? `/api/shorts/${short.id}/poster?v=${short.poster_v ?? "2"}` : undefined}
         className="h-full w-full object-contain"
         loop={!autoAdvance}
         onEnded={() => autoAdvance && onEnded?.()}
         muted={muted}
         playsInline
-        preload="metadata"
+        preload={active || next ? "auto" : "metadata"}
         onClick={onTap}
         onPointerDown={onPointerDown}
         onPointerUp={onPointerUp}

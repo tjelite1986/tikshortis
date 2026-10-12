@@ -23,6 +23,8 @@ export default function ShortsUpload({
   const [channel, setChannel] = useState<"main" | "18plus">(defaultChannel);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   const [busy, setBusy] = useState(false);
+  // 0–100 while the bytes leave the browser; null once the server is processing.
+  const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Released whenever it changes and on unmount — otherwise the whole file
@@ -42,27 +44,47 @@ export default function ShortsUpload({
     if (!file) return;
     setBusy(true);
     setError(null);
+    setProgress(0);
     try {
-      const form = new FormData();
-      form.append("file", file);
-      form.append("caption", caption);
-      form.append("channel", channel);
-      form.append("visibility", visibility);
-      const res = await fetch("/api/shorts/upload", {
-        method: "POST",
-        body: form,
+      // The file is the body and the fields travel in headers: the server then
+      // streams it to disk instead of holding a whole multipart form in memory.
+      // XMLHttpRequest rather than fetch because only it reports upload progress.
+      const res = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/shorts/upload");
+        xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+        xhr.setRequestHeader("x-upload-name", encodeURIComponent(file.name));
+        xhr.setRequestHeader("x-upload-caption", encodeURIComponent(caption));
+        xhr.setRequestHeader("x-upload-channel", channel);
+        xhr.setRequestHeader("x-upload-visibility", visibility);
+        xhr.upload.onprogress = (ev) => {
+          if (ev.lengthComputable) setProgress(Math.round((ev.loaded / ev.total) * 100));
+        };
+        xhr.upload.onload = () => setProgress(null);
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) return resolve({ ok: true });
+          let message = "Upload failed";
+          try {
+            message = JSON.parse(xhr.responseText).error || message;
+          } catch {
+            /* not JSON */
+          }
+          resolve({ ok: false, error: message });
+        };
+        xhr.onerror = () => resolve({ ok: false, error: "Upload failed" });
+        xhr.send(file);
       });
       if (res.ok) {
         router.push("/");
         router.refresh();
         return;
       }
-      const d = await res.json().catch(() => ({}));
-      setError(d.error || "Upload failed");
+      setError(res.error || "Upload failed");
     } catch {
       setError("Upload failed");
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   };
 
@@ -184,7 +206,11 @@ export default function ShortsUpload({
           disabled={!file || busy}
           className="w-full rounded-full bg-rose-500 py-3 text-sm font-semibold text-white transition active:scale-95 disabled:opacity-50"
         >
-          {busy ? "Uploading…" : "Post"}
+          {busy
+            ? progress === null
+              ? "Processing…"
+              : `Uploading… ${progress}%`
+            : "Post"}
         </button>
       </form>
     </div>

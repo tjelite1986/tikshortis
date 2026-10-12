@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+import { db } from "@/lib/db";
 import {
   canAccessChannel,
   getFeed,
@@ -30,6 +31,15 @@ export async function GET(request: Request) {
   const profileId = profileRaw && Number.isInteger(Number(profileRaw)) ? Number(profileRaw) : null;
   const playlistRaw = url.searchParams.get("playlist");
   const playlistId = playlistRaw && Number.isInteger(Number(playlistRaw)) ? Number(playlistRaw) : null;
+  // A playlist is private to the account that made it, the same rule the
+  // playlist page applies. Without this, any signed-in viewer could read what
+  // another account saved by guessing the id.
+  if (playlistId !== null) {
+    const owned = db
+      .prepare("SELECT 1 FROM short_playlists WHERE id = ? AND user_id = ?")
+      .get(playlistId, Number(session.sub));
+    if (!owned) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
   // Person scope: union the owner's own uploads (uploader_id) with the profile.
   const ownerRaw = url.searchParams.get("owner");
   const ownerId = ownerRaw && Number.isInteger(Number(ownerRaw)) ? Number(ownerRaw) : null;

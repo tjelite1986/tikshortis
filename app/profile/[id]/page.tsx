@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { ChevronLeft, Download } from "lucide-react";
 import { getSession } from "@/lib/auth";
-import { CHANNEL, getProfileLinks, getProfileSummary } from "@/lib/shorts";
+import { CHANNEL, getProfileLinks, getProfileSummary, parseShortsLength } from "@/lib/shorts";
 import ShortsGrid from "@/components/shorts-grid";
 import ProfileLinks from "@/components/profile-links";
 
@@ -24,9 +24,10 @@ function compact(n: number): string {
 export default async function ShortsProfilePage(
   props: {
     params: Promise<{ id: string }>;
+    searchParams: Promise<{ length?: string }>;
   }
 ) {
-  const params = await props.params;
+  const [params, searchParams] = await Promise.all([props.params, props.searchParams]);
   const session = await getSession();
   if (!session) redirect("/login");
 
@@ -96,6 +97,7 @@ export default async function ShortsProfilePage(
         adminActions={isAdmin}
         channel="main"
         lengthFilter
+        initialLength={parseShortsLength(searchParams.length ?? null)}
       />
     </div>
   );

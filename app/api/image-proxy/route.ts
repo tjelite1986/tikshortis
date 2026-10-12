@@ -4,6 +4,7 @@ import net from "node:net";
 import http from "node:http";
 import https from "node:https";
 import { getSession } from "@/lib/auth";
+import { allow } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -130,6 +131,15 @@ export async function GET(req: NextRequest) {
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  // Each call is an outbound fetch of up to MAX_BYTES held in memory. A page
+  // of avatars is a few dozen; a loop is not.
+  const gate = allow("image-proxy", session.sub, 120, 60_000);
+  if (!gate.ok) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(gate.retryAfter) } }
+    );
   }
 
   const raw = req.nextUrl.searchParams.get("url");

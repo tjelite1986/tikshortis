@@ -1,4 +1,5 @@
 import { cookies, headers } from "next/headers";
+import { timingSafeEqual } from "node:crypto";
 import { db, UserRow } from "./db";
 import { qb, getOne } from "./kysely";
 import { SESSION_COOKIE, verifyToken, type Appearance } from "./sso";
@@ -130,7 +131,13 @@ export function sameOriginPage(request: Request): boolean {
 export function hasAdminToken(request: Request): boolean {
   const expected = process.env.ADMIN_TOKEN;
   if (!expected) return false;
-  return request.headers.get("x-admin-token") === expected;
+  const given = request.headers.get("x-admin-token");
+  if (!given) return false;
+  // Constant-time: a plain === returns at the first differing byte, which lets
+  // a caller measure how much of a guess was right.
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 /**
