@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import {
@@ -68,7 +69,7 @@ export function profileSlug(name: string | null | undefined): string {
   return slug || "unknown";
 }
 
-function ensureDir(dir: string) {
+export function ensureDir(dir: string) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
@@ -202,11 +203,14 @@ export async function storeShortUpload(
   caption: string | null,
   filename: string,
   mime: string,
-  // Buffer (interactive uploads) or a path to a file already on disk (the
-  // folder importers) — the path form copies without buffering a multi-GB
-  // video through the Next process.
+  // Buffer (small interactive uploads) or a path to a file already on disk
+  // (the folder importers, and streamed uploads) — the path form never holds
+  // the video in the Next process. With `move`, the file is linked into place
+  // and the source removed, so a streamed upload on the same filesystem costs
+  // no second copy.
   source: Buffer | string,
-  subdir?: string | null
+  subdir?: string | null,
+  opts: { move?: boolean } = {}
 ): Promise<StoredShort> {
   if (!isSupportedVideo(filename, mime)) {
     throw new Error("Unsupported file type — videos only");
@@ -240,7 +244,7 @@ export async function storeShortUpload(
   for (let attempt = 0; ; attempt++) {
     try {
       if (typeof source === "string") {
-        fs.copyFileSync(source, videoPath, fs.constants.COPYFILE_EXCL);
+        placeFile(source, videoPath, opts.move === true);
       } else {
         fs.writeFileSync(videoPath, source, { flag: "wx" });
       }
@@ -253,13 +257,13 @@ export async function storeShortUpload(
     }
   }
 
-  const meta = readVideoMeta(videoPath);
+  const meta = await readVideoMeta(videoPath);
 
   // Best-effort poster. A failure here shouldn't fail the upload — the feed
   // falls back to the <video> element's own first frame.
   let posterKey: string | null = null;
   try {
-    const posterBuf = extractVideoPoster(videoPath);
+    const posterBuf = await extractVideoPoster(videoPath);
     posterKey = `${sub}/${base}.jpg`;
     await sharp(posterBuf)
       .resize(POSTER_MAX, POSTER_MAX, { fit: "inside", withoutEnlargement: true })
@@ -282,17 +286,39 @@ export async function storeShortUpload(
     mimeType: safeMime,
     width: meta.width,
     height: meta.height,
-    duration: durationFromProbe(videoPath),
+    duration: await durationFromProbe(videoPath),
     sizeBytes:
       typeof source === "string" ? fs.statSync(videoPath).size : source.length,
   };
 }
 
+// Puts `src` at `dest` without overwriting: a hard link is atomic and fails
+// with EEXIST on a collision, like the exclusive copy it replaces. Across
+// filesystems (EXDEV) it falls back to an exclusive copy. With `move`, the
+// source is removed afterwards.
+function placeFile(src: string, dest: string, move: boolean): void {
+  try {
+    fs.linkSync(src, dest);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
+    fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL);
+  }
+  if (move) {
+    try {
+      fs.unlinkSync(src);
+    } catch {
+      /* the caller's temp cleanup gets it */
+    }
+  }
+}
+
 // readVideoMeta doesn't expose duration, so do a tiny dedicated probe. Returns
 // null when ffprobe is missing or the value is unparseable.
-function durationFromProbe(filePath: string): number | null {
+const execFile = promisify(execFileCb);
+
+async function durationFromProbe(filePath: string): Promise<number | null> {
   try {
-    const out = execFileSync(
+    const { stdout: out } = await execFile(
       "ffprobe",
       [
         "-v",
@@ -328,11 +354,13 @@ export async function setCustomPoster(
   const tmpOut = path.join(os.tmpdir(), `${randomUUID()}.jpg`);
   const seek = Math.max(0, Number(timeSeconds) || 0).toFixed(2);
   try {
-    execFileSync(
+    await execFile(
       "ffmpeg",
       ["-y", "-ss", seek, "-i", videoPath, "-frames:v", "1", "-q:v", "3", tmpOut],
-      { stdio: "ignore" }
-    );
+      { encoding: "utf8" }
+    ).catch(() => {
+      /* checked by output size below */
+    });
     if (!fs.existsSync(tmpOut) || fs.statSync(tmpOut).size === 0) {
       throw new Error("ffmpeg produced no frame at that time");
     }

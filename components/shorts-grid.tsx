@@ -63,6 +63,7 @@ export default function ShortsGrid({
   restoreKey,
   isAdmin = false,
   lengthFilter = false,
+  initialLength = "all",
 }: {
   query: Record<string, string>;
   hrefPrefix: string;
@@ -84,6 +85,10 @@ export default function ShortsGrid({
   onSelect?: (shortId: number) => void;
   // Show the short/long segmented control above the tiles.
   lengthFilter?: boolean;
+  // The ?length the page was requested with, read on the server. Reading the
+  // URL in the browser instead made the first client render disagree with the
+  // server's, and React then left the wrong pill highlighted.
+  initialLength?: LengthFilter;
 }) {
   const router = useRouter();
   const [items, setItems] = useState<GridShort[]>([]);
@@ -94,13 +99,9 @@ export default function ShortsGrid({
   const [moveId, setMoveId] = useState<number | null>(null);
   const [editClip, setEditClip] = useState<{ id: number; caption: string | null } | null>(null);
   const [confirmDialog, confirmAsk] = useConfirm();
-  // Clip length, read from the live URL so a Back-navigation returns to the
-  // same slice (switchLength writes it with replaceState — no server round-trip).
-  const [length, setLength] = useState<LengthFilter>(() => {
-    if (!lengthFilter || typeof window === "undefined") return "all";
-    const raw = new URLSearchParams(window.location.search).get("length");
-    return raw === "short" || raw === "long" ? raw : "all";
-  });
+  // Clip length. switchLength writes it to the URL with replaceState, so a
+  // Back-navigation re-requests the page with it and lands on the same slice.
+  const [length, setLength] = useState<LengthFilter>(lengthFilter ? initialLength : "all");
   const [cols, switchCols] = useGridCols("shorts-grid-cols");
   // Shared by every inline clip: unmuting one keeps the next one audible.
   // Seeded from Settings > Playback, like the feed.

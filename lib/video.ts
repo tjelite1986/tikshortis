@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFile = promisify(execFileCb);
 import { randomUUID } from "node:crypto";
 
 // Video helpers, lifted unchanged from elite-v2's lib/gallery-storage.ts when
@@ -129,7 +132,9 @@ export interface VideoMeta {
 // Probe a video for dimensions, capture date and (Apple) GPS via ffprobe. Reads
 // from a file path because ffprobe can't take a buffer. Honours rotation
 // side-data so portrait clips report upright dimensions.
-export function readVideoMeta(filePath: string): VideoMeta {
+// Async, so a probe of a large upload does not stall every other request in
+// the one Node process while ffprobe reads the file.
+export async function readVideoMeta(filePath: string): Promise<VideoMeta> {
   const meta: VideoMeta = {
     takenAt: null,
     latitude: null,
@@ -138,7 +143,7 @@ export function readVideoMeta(filePath: string): VideoMeta {
     height: null,
   };
   try {
-    const out = execFileSync(
+    const { stdout: out } = await execFile(
       "ffprobe",
       [
         "-v",
@@ -207,14 +212,14 @@ export function readVideoMeta(filePath: string): VideoMeta {
 // Extract a single poster frame as a JPEG buffer for thumb/preview generation.
 // Seeks ~1s in (skips black intro frames); falls back to the very start for
 // sub-second clips.
-export function extractVideoPoster(filePath: string): Buffer {
+export async function extractVideoPoster(filePath: string): Promise<Buffer> {
   const tmpOut = path.join(os.tmpdir(), `${randomUUID()}.jpg`);
-  const run = (seek: string): boolean => {
+  const run = async (seek: string): Promise<boolean> => {
     try {
-      execFileSync(
+      await execFile(
         "ffmpeg",
         ["-y", "-ss", seek, "-i", filePath, "-frames:v", "1", "-q:v", "3", tmpOut],
-        { stdio: "ignore" }
+        { encoding: "utf8" }
       );
     } catch {
       /* checked by output size below */
@@ -222,7 +227,7 @@ export function extractVideoPoster(filePath: string): Buffer {
     return fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 0;
   };
   try {
-    if (!run("1") && !run("0")) {
+    if (!(await run("1")) && !(await run("0"))) {
       throw new Error("ffmpeg produced no poster frame");
     }
     return fs.readFileSync(tmpOut);

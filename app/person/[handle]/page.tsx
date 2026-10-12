@@ -4,6 +4,7 @@ import { ChevronLeft } from "lucide-react";
 import { getSession } from "@/lib/auth";
 import { personContentIds, getGroupMembers } from "@/lib/people";
 import ShortsGrid from "@/components/shorts-grid";
+import { parseShortsLength } from "@/lib/shorts";
 
 export const dynamic = "force-dynamic";
 
@@ -17,8 +18,9 @@ export const dynamic = "force-dynamic";
  */
 export default async function PersonPage(props: {
   params: Promise<{ handle: string }>;
+  searchParams: Promise<{ length?: string }>;
 }) {
-  const params = await props.params;
+  const [params, searchParams] = await Promise.all([props.params, props.searchParams]);
   const session = await getSession();
   if (!session) redirect("/login");
 
@@ -59,6 +61,7 @@ export default async function PersonPage(props: {
         adminActions={session.role === "admin"}
         channel="main"
         lengthFilter
+        initialLength={parseShortsLength(searchParams.length ?? null)}
       />
     </div>
   );
