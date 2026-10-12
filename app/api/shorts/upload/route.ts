@@ -42,6 +42,19 @@ const CLIENT_SAFE_ERRORS = new Set(["Unsupported file type — videos only"]);
 
 class TooLargeError extends Error {}
 
+function fromThisHost(request: Request): boolean {
+  const host = request.headers.get("host");
+  for (const value of [request.headers.get("origin"), request.headers.get("referer")]) {
+    if (!value) continue;
+    try {
+      return !!host && new URL(value).host === host;
+    } catch {
+      /* malformed: treated as absent */
+    }
+  }
+  return false;
+}
+
 /** Counts bytes through and fails the stream past the cap. */
 function byteCap(max: number): Transform {
   let total = 0;
@@ -152,6 +165,12 @@ async function readFormUpload(request: Request): Promise<Incoming | NextResponse
 // Upload one short. Uploading to the 18+ channel requires an unlocked gate, so
 // you can't seed that channel without the PIN.
 export async function POST(request: Request) {
+  // Not covered by middleware (see its matcher), so its CSRF check is here,
+  // against the Host header as middleware does: request.url carries the
+  // server's own bind address in the standalone build.
+  if (!fromThisHost(request)) {
+    return NextResponse.json({ error: "Bad origin" }, { status: 403 });
+  }
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

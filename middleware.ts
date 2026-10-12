@@ -53,5 +53,8 @@ export function middleware(request: NextRequest) {
 export const config = {
   // Everything but Next's own assets. The check is on the method, so this
   // costs a header read on the GETs it lets straight through.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // The upload route is left out: Next clones a body for middleware and keeps
+  // only the first 10 MB of it, so a streamed upload arrived truncated. The
+  // route checks the origin itself.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|api/shorts/upload$).*)"],
 };
