@@ -193,8 +193,11 @@ export default function ShortsFeed({
   // race each other (state, not a ref: the top sentinel re-arms on re-render).
   const [focusJumped, setFocusJumped] = useState(!effectiveFocus);
   const [activeId, setActiveId] = useState<number | null>(null);
+  // The active card's handle for the keyboard shortcuts and the hide-time
+  // watch report.
+  const activeApi = useRef<ShortCardApi | null>(null);
   // Watch reports from the cards, batched into the views beacon.
-  const reportView = useViewBeacon(true);
+  const reportView = useViewBeacon(true, () => activeApi.current?.watchSoFar() ?? null);
   // Resume: the main feed remembers the clip it was on, and a cold start
   // offers to go back there. Only the library-wide feed: a profile, playlist
   // or tag view is where you went on purpose. Resuming lands in the id-ordered
@@ -234,8 +237,6 @@ export default function ShortsFeed({
     return () => clearTimeout(t);
   }, [resume]);
 
-  // The active card's handle for the keyboard shortcuts.
-  const activeApi = useRef<ShortCardApi | null>(null);
   const registerApi = useCallback((api: ShortCardApi | null) => {
     activeApi.current = api;
   }, []);

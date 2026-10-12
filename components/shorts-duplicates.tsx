@@ -569,15 +569,8 @@ function ComparePlayer({
   // Which copy has sound; null = all muted.
   const [soundId, setSoundId] = useState<number | null>(null);
 
+  // Escape is handled by useBackDismiss.
   useBackDismiss(true, onClose);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   // React's `muted` prop is unreliable on <video>; set the property directly.
   useEffect(() => {

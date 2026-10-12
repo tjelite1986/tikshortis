@@ -2,17 +2,23 @@
 
 import { useCallback, useEffect, useRef } from "react";
 
-type Report = { id: number; watchMs: number; completed: boolean };
+export type Report = { id: number; watchMs: number; completed: boolean };
 
 /**
  * Collects the cards' watch reports and sends them in batches: a few seconds
  * after the first one lands, and at once when the page is hidden (the only
  * reliable moment on a phone). sendBeacon survives navigation; fetch with
  * keepalive is the fallback for browsers without it.
+ *
+ * Cards report when they stop being active, which a closed tab or a reload
+ * never gets to. `live` hands over the active card's progress so far, and is
+ * read when the page is hidden.
  */
-export function useViewBeacon(enabled: boolean) {
+export function useViewBeacon(enabled: boolean, live?: () => Report | null) {
   const queue = useRef<Report[]>([]);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveRef = useRef(live);
+  liveRef.current = live;
 
   const flush = useCallback(() => {
     if (timer.current) {
@@ -45,14 +51,19 @@ export function useViewBeacon(enabled: boolean) {
 
   useEffect(() => {
     if (!enabled) return;
+    const flushWithLive = () => {
+      const r = liveRef.current?.();
+      if (r) queue.current.push(r);
+      flush();
+    };
     const onHide = () => {
-      if (document.visibilityState === "hidden") flush();
+      if (document.visibilityState === "hidden") flushWithLive();
     };
     document.addEventListener("visibilitychange", onHide);
-    window.addEventListener("pagehide", flush);
+    window.addEventListener("pagehide", flushWithLive);
     return () => {
       document.removeEventListener("visibilitychange", onHide);
-      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("pagehide", flushWithLive);
       flush();
     };
   }, [enabled, flush]);

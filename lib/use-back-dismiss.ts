@@ -29,10 +29,24 @@ function handlePop() {
   if (entry) entry.close();
 }
 
+// Escape closes the newest overlay, the same one Back would. Bubble phase on
+// document, so a control inside the overlay that handles Escape itself (an
+// inline rename field) can preventDefault and keep the overlay open. The
+// entry is closed, not popped: its effect cleanup then rewinds the history
+// entry like any other UI close.
+function handleKey(e: KeyboardEvent) {
+  if (e.key !== "Escape" || e.defaultPrevented) return;
+  const entry = stack[stack.length - 1];
+  if (!entry) return;
+  e.preventDefault();
+  entry.close();
+}
+
 function ensureInit() {
   if (initialized || typeof window === "undefined") return;
   initialized = true;
   window.addEventListener("popstate", handlePop);
+  document.addEventListener("keydown", handleKey);
 }
 
 export function useBackDismiss(open: boolean, onClose: () => void) {

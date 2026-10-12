@@ -10,7 +10,7 @@ import {
 import { kindForUrl, linkUrlKey, parseLinkUrl } from "./profile-links";
 import { qb, getOne, getAll } from "./kysely";
 import { personContentIds } from "./people";
-import { CANDIDATE_POOL, rankedForVisit, type Candidate } from "./ranking";
+import { RECENT_POOL, pickBacklog, rankedForVisit, type Candidate } from "./ranking";
 
 // This app serves one channel. The column and this parser survived the move out
 // of elite-v2 because the schema, the storage keys and the maintenance scripts
@@ -545,33 +545,43 @@ export function getFeed(
       length,
       unseen,
     });
-    const ranked = rankedForVisit(viewerId, s32, filterKey, () =>
-      getAll<Candidate>(
+    const ranked = rankedForVisit(viewerId, s32, filterKey, (aff) => {
+      const candidates = base.clearSelect().select([
+        "s.id",
+        "s.profile_id",
+        "s.uploader_id",
+        "p.name as profile_name",
+        sql<string | null>`COALESCE(u.display_name, u.username)`.as("uploader_name"),
+        "s.caption",
+        "s.created_at",
+        sql<number>`(SELECT COUNT(*) FROM short_likes l WHERE l.short_id = s.id)`.as(
+          "like_count"
+        ),
+        sql<number>`(SELECT COUNT(*) FROM short_comments c WHERE c.short_id = s.id)`.as(
+          "comment_count"
+        ),
+        sql<number>`(EXISTS(SELECT 1 FROM short_likes l WHERE l.short_id = s.id AND l.user_id = ${viewerId})
+          OR EXISTS(SELECT 1 FROM short_playlist_items pi JOIN short_playlists pl ON pl.id = pi.playlist_id WHERE pi.short_id = s.id AND pl.user_id = ${viewerId}))`.as(
+          "viewer_engaged"
+        ),
+      ]);
+      const recent = getAll<Candidate>(
+        candidates.orderBy("s.id", "desc").limit(RECENT_POOL)
+      );
+      if (recent.length < RECENT_POOL) return recent;
+      // Older clips: ids and creators only, the pick happens in JS, then the
+      // full candidate rows for the picked ones.
+      const older = getAll<{ id: number; profile_id: number | null; uploader_id: number | null }>(
         base
           .clearSelect()
-          .select([
-            "s.id",
-            "s.profile_id",
-            "s.uploader_id",
-            "p.name as profile_name",
-            sql<string | null>`COALESCE(u.display_name, u.username)`.as("uploader_name"),
-            "s.caption",
-            "s.created_at",
-            sql<number>`(SELECT COUNT(*) FROM short_likes l WHERE l.short_id = s.id)`.as(
-              "like_count"
-            ),
-            sql<number>`(SELECT COUNT(*) FROM short_comments c WHERE c.short_id = s.id)`.as(
-              "comment_count"
-            ),
-            sql<number>`(EXISTS(SELECT 1 FROM short_likes l WHERE l.short_id = s.id AND l.user_id = ${viewerId})
-              OR EXISTS(SELECT 1 FROM short_playlist_items pi JOIN short_playlists pl ON pl.id = pi.playlist_id WHERE pi.short_id = s.id AND pl.user_id = ${viewerId}))`.as(
-              "viewer_engaged"
-            ),
-          ])
-          .orderBy("s.id", "desc")
-          .limit(CANDIDATE_POOL)
-      )
-    );
+          .select(["s.id", "s.profile_id", "s.uploader_id"])
+          .where("s.id", "<", recent[recent.length - 1].id)
+      );
+      const picked = pickBacklog(older, aff, s32);
+      return picked.length
+        ? [...recent, ...getAll<Candidate>(candidates.where("s.id", "in", picked))]
+        : recent;
+    });
     const offset = Math.max(0, cursor ?? 0);
     const pageIds = ranked.ids.slice(offset, offset + limit);
     const rows = pageIds.length
