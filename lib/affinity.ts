@@ -23,7 +23,14 @@ export interface Affinity {
   followed: Set<string>;
   /** Creator keys the viewer has watched anything from. */
   seenCreators: Set<string>;
+  /** Which kind of signal gave each creator the most weight, for the reason text. */
+  creatorSource: Map<string, Source>;
+  /** The same per hashtag. */
+  tagSource: Map<string, Source>;
 }
+
+/** The positive signals a reason can name. */
+export type Source = "like" | "save" | "comment" | "watch";
 
 const W = {
   follow: 6,
@@ -61,16 +68,38 @@ export function computeAffinity(viewerId: number): Affinity {
   const tags = new Map<string, number>();
   const seenCreators = new Set<string>();
   let evidence = 0;
+  // Positive weight per key and kind of signal; the largest names the reason.
+  const creatorBySource = new Map<string, Map<Source, number>>();
+  const tagBySource = new Map<string, Map<Source, number>>();
+  const note = (m: Map<string, Map<Source, number>>, key: string, src: Source, w: number) => {
+    let per = m.get(key);
+    if (!per) m.set(key, (per = new Map()));
+    per.set(src, (per.get(src) ?? 0) + w);
+  };
+  const strongest = (m: Map<string, Map<Source, number>>) => {
+    const out = new Map<string, Source>();
+    for (const [key, per] of m) {
+      let best: Source | null = null;
+      for (const [src, w] of per) if (best === null || w > per.get(best)!) best = src;
+      if (best) out.set(key, best);
+    }
+    return out;
+  };
 
   const bump = (map: Map<string, number>, key: string, w: number) => {
     const next = Math.max(MIN_PER_KEY, Math.min(MAX_PER_KEY, (map.get(key) ?? 0) + w));
     map.set(key, next);
   };
-  const credit = (clip: ClipFacts, w: number) => {
+  const credit = (clip: ClipFacts, w: number, src?: Source) => {
     const ck = creatorKey(clip);
     if (ck) bump(creators, ck, w);
+    if (ck && src) note(creatorBySource, ck, src, w);
     const tagList = parseHashtags(clip.caption);
-    for (const t of tagList) bump(tags, t, (w * W.tagShare) / Math.max(1, Math.sqrt(tagList.length)));
+    for (const t of tagList) {
+      const tw = (w * W.tagShare) / Math.max(1, Math.sqrt(tagList.length));
+      bump(tags, t, tw);
+      if (src) note(tagBySource, t, src, tw);
+    }
     if (w > 0) evidence += w;
   };
 
@@ -82,7 +111,7 @@ export function computeAffinity(viewerId: number): Affinity {
     `SELECT s.profile_id, s.uploader_id, s.caption, s.duration
      FROM short_likes l JOIN shorts s ON s.id = l.short_id WHERE l.user_id = ?`
   )) {
-    credit(c, W.like);
+    credit(c, W.like, "like");
   }
   for (const c of facts(
     `SELECT DISTINCT s.profile_id, s.uploader_id, s.caption, s.duration
@@ -90,13 +119,13 @@ export function computeAffinity(viewerId: number): Affinity {
      JOIN short_playlists pl ON pl.id = pi.playlist_id
      JOIN shorts s ON s.id = pi.short_id WHERE pl.user_id = ?`
   )) {
-    credit(c, W.save);
+    credit(c, W.save, "save");
   }
   for (const c of facts(
     `SELECT DISTINCT s.profile_id, s.uploader_id, s.caption, s.duration
      FROM short_comments c JOIN shorts s ON s.id = c.short_id WHERE c.user_id = ?`
   )) {
-    credit(c, W.comment);
+    credit(c, W.comment, "comment");
   }
   for (const c of facts(
     `SELECT s.profile_id, s.uploader_id, s.caption, s.duration
@@ -139,12 +168,20 @@ export function computeAffinity(viewerId: number): Affinity {
         const h = history.get(r.id)!;
         const dur = r.duration ?? 0;
         const frac = dur > 0 ? h.watchMs / 1000 / dur : 0;
-        if (h.completed) credit(r, W.completed);
-        else if (frac >= 0.5) credit(r, W.watchedHalf);
+        if (h.completed) credit(r, W.completed, "watch");
+        else if (frac >= 0.5) credit(r, W.watchedHalf, "watch");
         else if (dur >= 8 && h.watchMs < 3000) credit(r, W.skipped);
       }
     }
   }
 
-  return { creators, tags, evidence, followed, seenCreators };
+  return {
+    creators,
+    tags,
+    evidence,
+    followed,
+    seenCreators,
+    creatorSource: strongest(creatorBySource),
+    tagSource: strongest(tagBySource),
+  };
 }

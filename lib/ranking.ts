@@ -1,4 +1,4 @@
-import { computeAffinity, creatorKey, type Affinity } from "./affinity";
+import { computeAffinity, creatorKey, type Affinity, type Source } from "./affinity";
 import { parseHashtags } from "./import-naming";
 import { viewHistory } from "./views";
 
@@ -58,6 +58,21 @@ function ageDays(createdAt: string, now: number): number {
   const then = new Date(createdAt.includes("T") ? createdAt : createdAt.replace(" ", "T") + "Z");
   return Math.max(0, (now - then.getTime()) / 86_400_000);
 }
+
+/** "Because you ___ clips from X." */
+const CREATOR_VERB: Record<Source, string> = {
+  like: "liked",
+  save: "saved",
+  comment: "commented on",
+  watch: "watch",
+};
+/** "Tagged #t, ___." */
+const TAG_PHRASE: Record<Source, string> = {
+  like: "like clips you liked",
+  save: "like clips you saved",
+  comment: "like clips you commented on",
+  watch: "which you watch",
+};
 
 function creatorName(c: Candidate): string | null {
   return c.profile_name ?? c.uploader_name;
@@ -132,10 +147,12 @@ export function rankCandidates(
     let reason: string;
     if (ck && aff.followed.has(ck)) {
       reason = name ? `From ${name}, who you follow.` : "From a creator you follow.";
-    } else if (cw >= 3 && name) {
-      reason = `Because you liked clips from ${name}.`;
-    } else if (bestTag && bestTagW >= 2) {
-      reason = `Tagged #${bestTag}, which you watch.`;
+    } else if (cw >= 3 && name && ck && aff.creatorSource.has(ck)) {
+      // Named after the signal that gave the weight: a creator known only
+      // from saves or finished clips was never "liked".
+      reason = `Because you ${CREATOR_VERB[aff.creatorSource.get(ck)!]} clips from ${name}.`;
+    } else if (bestTag && bestTagW >= 2 && aff.tagSource.has(bestTag)) {
+      reason = `Tagged #${bestTag}, ${TAG_PHRASE[aff.tagSource.get(bestTag)!]}.`;
     } else if (c.like_count >= 1) {
       reason = `Popular here: ${c.like_count} ${c.like_count === 1 ? "like" : "likes"}${
         c.comment_count ? ` and ${c.comment_count} ${c.comment_count === 1 ? "comment" : "comments"}` : ""
