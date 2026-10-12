@@ -6,15 +6,16 @@ export type ViewReport = { id: number; watchMs: number; completed: boolean };
 /** Upper bound on one report, so a stuck timer cannot write hours into a row. */
 const MAX_WATCH_MS = 60 * 60 * 1000;
 
-// Millisecond stamps: two clips left within the same second must still order
-// on /history by which was left last.
+// Millisecond stamps, one per report: SQLite's 'now' is fixed for a whole
+// transaction, so a beacon batch would otherwise share one stamp and /history
+// would order it by id instead of by which clip was left last.
 const UPSERT = `INSERT INTO short_views (short_id, user_id, views, watch_ms, completed, first_viewed_at, last_viewed_at)
-   VALUES (?, ?, 1, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+   VALUES (?, ?, 1, ?, ?, ?, ?)
    ON CONFLICT(short_id, user_id) DO UPDATE SET
      views = views + 1,
      watch_ms = MAX(watch_ms, excluded.watch_ms),
      completed = MAX(completed, excluded.completed),
-     last_viewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
+     last_viewed_at = excluded.last_viewed_at`;
 
 /**
  * Records a batch of views for one viewer. Only clips that exist are written,
@@ -25,10 +26,13 @@ export function recordViews(userId: number, reports: ViewReport[]): number {
   const upsert = db.prepare(UPSERT);
   const run = db.transaction((list: ViewReport[]) => {
     let written = 0;
-    for (const r of list) {
+    // Reports arrive in the order the clips were left; the last one is newest.
+    const base = Date.now() - list.length;
+    for (const [i, r] of list.entries()) {
       const watch = Math.max(0, Math.min(MAX_WATCH_MS, Math.round(r.watchMs)));
+      const at = new Date(base + i + 1).toISOString();
       try {
-        upsert.run(r.id, userId, watch, r.completed ? 1 : 0);
+        upsert.run(r.id, userId, watch, r.completed ? 1 : 0, at, at);
         written++;
       } catch {
         /* unknown clip: the foreign key refused it */

@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSoundPreference } from "@/components/use-sound-preference";
 import { flushSync } from "react-dom";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import {
   Eye,
   EyeOff,
@@ -196,7 +195,6 @@ export default function ShortsFeed({
   const [activeId, setActiveId] = useState<number | null>(null);
   // Watch reports from the cards, batched into the views beacon.
   const reportView = useViewBeacon(true);
-  const router = useRouter();
   // Resume: the main feed remembers the clip it was on, and a cold start
   // offers to go back there. Only the library-wide feed: a profile, playlist
   // or tag view is where you went on purpose. Resuming lands in the id-ordered
@@ -717,7 +715,8 @@ export default function ShortsFeed({
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const t = e.target as HTMLElement | null;
       if (t?.closest("input, textarea, select, [contenteditable='true']")) return;
-      if (t?.closest("[role='dialog']")) return;
+      // An open sheet has the keys even when focus stayed on the page behind it.
+      if (document.querySelector("[role='dialog'][aria-modal='true']")) return;
       const id = activeId;
       switch (e.key) {
         case "ArrowDown":
@@ -854,7 +853,9 @@ export default function ShortsFeed({
             type="button"
             onClick={() => {
               setResume(null);
-              router.push(`/?focus=${resume.focus}`);
+              // A hard navigation: on a soft one the feed reads the ?focus that
+              // scrolling already wrote into the live URL and lands on that clip.
+              window.location.assign(`/?focus=${resume.focus}`);
             }}
             className="flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-black shadow-lg"
           >

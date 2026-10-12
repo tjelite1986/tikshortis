@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { canAccessChannel, canViewShort, getShort } from "@/lib/shorts";
-import { forgetRankings } from "@/lib/ranking";
 
 export const dynamic = "force-dynamic";
 
@@ -39,8 +38,6 @@ export async function POST(
   db.prepare(
     "INSERT OR IGNORE INTO short_hides (short_id, user_id) VALUES (?, ?)",
   ).run(r.shortId, r.userId);
-  // The visit's For You order was ranked with this clip in it.
-  forgetRankings(r.userId);
   return NextResponse.json({ ok: true, hidden: true });
 }
 
@@ -54,6 +51,5 @@ export async function DELETE(
     r.shortId,
     r.userId,
   );
-  forgetRankings(r.userId);
   return NextResponse.json({ ok: true, hidden: false });
 }

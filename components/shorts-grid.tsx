@@ -687,7 +687,7 @@ function MoveSheet({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end" onClick={onClose}>
+    <div role="dialog" aria-modal="true" className="fixed inset-0 z-50 flex flex-col justify-end" onClick={onClose}>
       <div
         className="flex max-h-[70%] flex-col rounded-t-2xl bg-neutral-900 text-white"
         onClick={(e) => e.stopPropagation()}

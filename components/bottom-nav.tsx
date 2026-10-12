@@ -130,6 +130,8 @@ export default function BottomNav({
 
       {menuOpen && (
         <div
+          role="dialog"
+          aria-modal="true"
           className="fixed inset-0 z-50 flex flex-col justify-end bg-black/50"
           onClick={() => setMenuOpen(false)}
         >
