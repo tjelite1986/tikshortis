@@ -13,9 +13,15 @@ import {
   ChevronsDown,
   ChevronsUp,
   Undo2,
+  History,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import ShortCard, { type FeedShort } from "@/components/short-card";
+import ShortCard, { type FeedShort, type ShortCardApi } from "@/components/short-card";
+import { useViewBeacon } from "@/lib/view-beacon";
+
+// Where the main feed keeps the clip it was last on, for the resume offer.
+const RESUME_KEY = "tikshortis:resume";
+const RESUME_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 // How many cards on either side of the active one keep a loaded <video>.
 // Two covers a fast swipe in either direction without a visible stall.
@@ -187,6 +193,52 @@ export default function ShortsFeed({
   // race each other (state, not a ref: the top sentinel re-arms on re-render).
   const [focusJumped, setFocusJumped] = useState(!effectiveFocus);
   const [activeId, setActiveId] = useState<number | null>(null);
+  // Watch reports from the cards, batched into the views beacon.
+  const reportView = useViewBeacon(true);
+  // Resume: the main feed remembers the clip it was on, and a cold start
+  // offers to go back there. Only the library-wide feed: a profile, playlist
+  // or tag view is where you went on purpose. Resuming lands in the id-ordered
+  // feed at that clip (a ranked order cannot anchor a clip).
+  const isMainFeed = !profileId && !playlistId && !handle && !tag;
+  const [resume, setResume] = useState<{ focus: number } | null>(null);
+  useEffect(() => {
+    if (!isMainFeed || effectiveFocus) return;
+    try {
+      const raw = localStorage.getItem(RESUME_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { focus?: unknown; at?: unknown };
+      if (
+        typeof saved.focus === "number" &&
+        typeof saved.at === "number" &&
+        Date.now() - saved.at < RESUME_MAX_AGE_MS
+      ) {
+        setResume({ focus: saved.focus });
+      }
+    } catch {
+      /* storage blocked or malformed: no offer */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!isMainFeed || activeId === null) return;
+    try {
+      localStorage.setItem(RESUME_KEY, JSON.stringify({ focus: activeId, at: Date.now() }));
+    } catch {
+      /* storage blocked: nothing to resume later */
+    }
+  }, [isMainFeed, activeId]);
+  // The offer fades once the viewer has moved on by themselves.
+  useEffect(() => {
+    if (!resume) return;
+    const t = setTimeout(() => setResume(null), 15_000);
+    return () => clearTimeout(t);
+  }, [resume]);
+
+  // The active card's handle for the keyboard shortcuts.
+  const activeApi = useRef<ShortCardApi | null>(null);
+  const registerApi = useCallback((api: ShortCardApi | null) => {
+    activeApi.current = api;
+  }, []);
   // Cards this far from the active one keep their video loaded; the rest
   // hold only a poster. Before the first card is known, the top of the list.
   const activeIndex = useMemo(() => {
@@ -640,6 +692,67 @@ export default function ShortsFeed({
     [items]
   );
 
+  // Step to the clip before the active one.
+  const retreatFrom = useCallback(
+    (id: number) => {
+      const root = containerRef.current;
+      if (!root) return;
+      const idx = items.findIndex((s) => s.id === id);
+      const prev = items[idx - 1];
+      if (!prev) return;
+      root
+        .querySelector(`[data-short-id="${prev.id}"]`)
+        ?.scrollIntoView({ behavior: "smooth" });
+    },
+    [items]
+  );
+
+  // Desktop keyboard: j/k or the arrows step between clips, space plays or
+  // pauses, m mutes, l likes, s opens the save sheet, f toggles fullscreen.
+  // Nothing fires while typing in a field or while a sheet has the keys.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest("input, textarea, select, [contenteditable='true']")) return;
+      // An open sheet has the keys even when focus stayed on the page behind it.
+      if (document.querySelector("[role='dialog'][aria-modal='true']")) return;
+      const id = activeId;
+      switch (e.key) {
+        case "ArrowDown":
+        case "j":
+        case "PageDown":
+          if (id !== null) advanceFrom(id);
+          break;
+        case "ArrowUp":
+        case "k":
+        case "PageUp":
+          if (id !== null) retreatFrom(id);
+          break;
+        case " ":
+          activeApi.current?.togglePlay();
+          break;
+        case "m":
+          toggleMuted();
+          break;
+        case "l":
+          activeApi.current?.like();
+          break;
+        case "s":
+          activeApi.current?.openSave();
+          break;
+        case "f":
+          toggleFullscreen();
+          break;
+        default:
+          return;
+      }
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeId, advanceFrom, retreatFrom, toggleMuted, toggleFullscreen]);
+
   const controlBtn =
     "rounded-full bg-black/50 p-2 text-white ring-1 ring-white/10 backdrop-blur transition hover:bg-black/70";
 
@@ -687,6 +800,8 @@ export default function ShortsFeed({
               onEnded={() => advanceFrom(short.id)}
               onRemoved={(id) => setItems((prev) => prev.filter((s) => s.id !== id))}
               onHidden={onHidden}
+              onViewed={reportView}
+              registerApi={registerApi}
             />
           </div>
         ))}
@@ -731,6 +846,24 @@ export default function ShortsFeed({
           </div>
         )}
       </div>
+
+      {resume && items.length > 0 && items[0].id !== resume.focus && (
+        <div data-immersive-hide className="absolute left-1/2 top-14 z-40 -translate-x-1/2">
+          <button
+            type="button"
+            onClick={() => {
+              setResume(null);
+              // A hard navigation: on a soft one the feed reads the ?focus that
+              // scrolling already wrote into the live URL and lands on that clip.
+              window.location.assign(`/?focus=${resume.focus}`);
+            }}
+            className="flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-black shadow-lg"
+          >
+            <History size={16} />
+            Continue where you left off
+          </button>
+        </div>
+      )}
 
       {/* Top-center feed mode selector: "For You ˅" expanding to the ordering
           modes. Switches the feed in place via switchMode — no navigation, so a

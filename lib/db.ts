@@ -129,6 +129,26 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_short_hides_user
       ON short_hides(user_id, short_id);
 
+    -- Watch history: one row per viewer and clip, updated by the player's
+    -- beacon. It drives the "Seen" marker, the unseen filter, /history and the
+    -- For You ranking (a clip watched to the end counts for its creator and
+    -- tags; one skipped after a couple of seconds counts against them).
+    -- watch_ms is the longest stretch reached, not a running total, so looping
+    -- a clip does not inflate it.
+    CREATE TABLE IF NOT EXISTS short_views (
+      short_id INTEGER NOT NULL REFERENCES shorts(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL,
+      views INTEGER NOT NULL DEFAULT 1,
+      watch_ms INTEGER NOT NULL DEFAULT 0,
+      completed INTEGER NOT NULL DEFAULT 0,
+      first_viewed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_viewed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (short_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_short_views_user_last
+      ON short_views(user_id, last_viewed_at);
+
     -- Report: a viewer flagging a clip for an admin to look at. One row per
     -- viewer and clip (a second report from the same viewer replaces the
     -- first); an admin dismissing the clip's reports stamps resolved_at.
@@ -488,6 +508,16 @@ export interface ShortHideRow {
   short_id: number;
   user_id: number;
   created_at: string;
+}
+
+export interface ShortViewRow {
+  short_id: number;
+  user_id: number;
+  views: number;
+  watch_ms: number;
+  completed: number;
+  first_viewed_at: string;
+  last_viewed_at: string;
 }
 
 export interface ShortReportRow {

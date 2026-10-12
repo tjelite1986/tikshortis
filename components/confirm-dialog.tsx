@@ -61,6 +61,8 @@ function ConfirmDialog({
   return (
     // z-[1300]: above lightboxes (z-50) and the floating controls (z-[1100]).
     <div
+      role="dialog"
+      aria-modal="true"
       className="fixed inset-0 z-[1300] flex items-center justify-center bg-black/60 p-6"
       onClick={onCancel}
     >

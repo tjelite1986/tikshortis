@@ -119,6 +119,8 @@ export default function ShortsEditSheet({
 
   return (
     <div
+      role="dialog"
+      aria-modal="true"
       className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60"
       onClick={onClose}
     >

@@ -18,7 +18,9 @@ export default async function ShortsPage(
   // downgrades ONLY the offset-paginated modes (foryou/random) to "new" — those
   // can't anchor a clip; the id-ordered modes (new/following/liked) keep their
   // mode, so Back / reload restores the feed the user was actually in.
-  const requested = searchParams?.sort ? parseShortsSort(searchParams.sort) : null;
+  // "history" is a grid page, not a feed mode; on the feed it reads as "new".
+  const parsed = searchParams?.sort ? parseShortsSort(searchParams.sort) : null;
+  const requested = parsed === "history" ? ("new" as const) : parsed;
   // Clip-length filter, so a reload or Back returns to the same slice.
   const length = parseShortsLength(searchParams?.length ?? null);
   const offsetSort = requested === "foryou" || requested === "random";
