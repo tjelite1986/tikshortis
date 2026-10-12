@@ -72,7 +72,7 @@ export async function POST(request: Request) {
     if (Array.isArray(body.views)) {
       reports = body.views
         .filter(
-          (v): v is { id: number; watchMs?: unknown; completed?: unknown } =>
+          (v): v is { id: number; watchMs?: unknown; completed?: unknown; continued?: unknown } =>
             typeof v === "object" && v !== null && Number.isInteger((v as { id?: unknown }).id)
         )
         .slice(0, MAX_REPORTS)
@@ -80,6 +80,7 @@ export async function POST(request: Request) {
           id: v.id,
           watchMs: typeof v.watchMs === "number" && Number.isFinite(v.watchMs) ? v.watchMs : 0,
           completed: v.completed === true,
+          continued: v.continued === true,
         }));
     }
   } catch {

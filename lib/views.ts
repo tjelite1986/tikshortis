@@ -1,7 +1,11 @@
 import { db } from "./db";
 
-/** One clip's watch report from the player: how far it got, and whether it finished. */
-export type ViewReport = { id: number; watchMs: number; completed: boolean };
+/**
+ * One clip's watch report from the player: how far it got, and whether it
+ * finished. `continued`: the same stretch on screen was already reported when
+ * the page was hidden, so this one only raises the figures, not the count.
+ */
+export type ViewReport = { id: number; watchMs: number; completed: boolean; continued?: boolean };
 
 /** Upper bound on one report, so a stuck timer cannot write hours into a row. */
 const MAX_WATCH_MS = 60 * 60 * 1000;
@@ -12,7 +16,7 @@ const MAX_WATCH_MS = 60 * 60 * 1000;
 const UPSERT = `INSERT INTO short_views (short_id, user_id, views, watch_ms, completed, first_viewed_at, last_viewed_at)
    VALUES (?, ?, 1, ?, ?, ?, ?)
    ON CONFLICT(short_id, user_id) DO UPDATE SET
-     views = views + 1,
+     views = views + ?,
      watch_ms = MAX(watch_ms, excluded.watch_ms),
      completed = MAX(completed, excluded.completed),
      last_viewed_at = excluded.last_viewed_at`;
@@ -32,7 +36,7 @@ export function recordViews(userId: number, reports: ViewReport[]): number {
       const watch = Math.max(0, Math.min(MAX_WATCH_MS, Math.round(r.watchMs)));
       const at = new Date(base + i + 1).toISOString();
       try {
-        upsert.run(r.id, userId, watch, r.completed ? 1 : 0, at, at);
+        upsert.run(r.id, userId, watch, r.completed ? 1 : 0, at, at, r.continued ? 0 : 1);
         written++;
       } catch {
         /* unknown clip: the foreign key refused it */

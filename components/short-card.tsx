@@ -74,13 +74,18 @@ function hasUnsent(w: {
   return w.wasActive && (w.maxTime > w.sentMax || (w.completed && !w.sentCompleted));
 }
 
+/** A hide-time report already carried part of this stretch. */
+function wasSent(w: { sentMax: number; sentCompleted: boolean }): boolean {
+  return w.sentMax > 0 || w.sentCompleted;
+}
+
 export interface ShortCardApi {
   togglePlay: () => void;
   like: () => void;
   openSave: () => void;
   // The watch report so far, for a page that is being hidden. Marks it sent,
   // so the report when the card later goes inactive only covers new progress.
-  watchSoFar: () => { id: number; watchMs: number; completed: boolean } | null;
+  watchSoFar: () => { id: number; watchMs: number; completed: boolean; continued: boolean } | null;
 }
 
 export interface FeedShort {
@@ -216,7 +221,10 @@ export default function ShortCard({
   // Watch report, once per stretch on screen: fired when the card stops being
   // the active one (or unmounts) with how far the clip got and whether it
   // reached the end. The feed batches these into the views beacon.
-  onViewed?: (id: number, report: { watchMs: number; completed: boolean }) => void;
+  onViewed?: (
+    id: number,
+    report: { watchMs: number; completed: boolean; continued?: boolean }
+  ) => void;
   // While active, the card hands the feed a handle for the keyboard: play/pause,
   // like, open the save sheet. Called with null when it stops being active.
   registerApi?: (api: ShortCardApi | null) => void;
@@ -584,9 +592,10 @@ export default function ShortCard({
       watchSoFar: () => {
         const w = watch.current;
         if (!hasUnsent(w)) return null;
+        const continued = wasSent(w);
         w.sentMax = w.maxTime;
         w.sentCompleted = w.completed;
-        return { id: short.id, watchMs: w.maxTime * 1000, completed: w.completed };
+        return { id: short.id, watchMs: w.maxTime * 1000, completed: w.completed, continued };
       },
     };
     registerApi(api);
@@ -611,7 +620,11 @@ export default function ShortCard({
     const send = hasUnsent(w);
     w.wasActive = false;
     if (send) {
-      onViewedRef.current?.(short.id, { watchMs: w.maxTime * 1000, completed: w.completed });
+      onViewedRef.current?.(short.id, {
+        watchMs: w.maxTime * 1000,
+        completed: w.completed,
+        continued: wasSent(w),
+      });
     }
   }, [active, short.id]);
   useEffect(() => {
@@ -620,7 +633,11 @@ export default function ShortCard({
     const w = watch.current;
     return () => {
       if (hasUnsent(w)) {
-        onViewedRef.current?.(short.id, { watchMs: w.maxTime * 1000, completed: w.completed });
+        onViewedRef.current?.(short.id, {
+          watchMs: w.maxTime * 1000,
+          completed: w.completed,
+          continued: wasSent(w),
+        });
       }
     };
   }, [short.id]);

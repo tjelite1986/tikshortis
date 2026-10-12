@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef } from "react";
 
-export type Report = { id: number; watchMs: number; completed: boolean };
+/** `continued`: see ViewReport in lib/views. */
+export type Report = { id: number; watchMs: number; completed: boolean; continued?: boolean };
 
 /**
  * Collects the cards' watch reports and sends them in batches: a few seconds
@@ -28,7 +29,11 @@ export function useViewBeacon(enabled: boolean, live?: () => Report | null) {
     if (!queue.current.length) return;
     // Latest report per clip wins; the server keeps the max anyway.
     const byId = new Map<number, Report>();
-    for (const r of queue.current) byId.set(r.id, r);
+    // A batch that holds a fresh report for a clip still counts one view.
+    for (const r of queue.current) {
+      const prev = byId.get(r.id);
+      byId.set(r.id, prev ? { ...r, continued: !!prev.continued && !!r.continued } : r);
+    }
     queue.current = [];
     const body = JSON.stringify({ views: [...byId.values()].slice(-50) });
     try {
@@ -41,7 +46,7 @@ export function useViewBeacon(enabled: boolean, live?: () => Report | null) {
   }, []);
 
   const report = useCallback(
-    (id: number, r: { watchMs: number; completed: boolean }) => {
+    (id: number, r: { watchMs: number; completed: boolean; continued?: boolean }) => {
       if (!enabled) return;
       queue.current.push({ id, ...r });
       if (!timer.current) timer.current = setTimeout(flush, 4000);

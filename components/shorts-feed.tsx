@@ -63,6 +63,9 @@ const LENGTH_LABELS: Record<LengthFilter, string> = {
 };
 const LENGTH_ORDER: readonly LengthFilter[] = ["all", "short", "long"];
 
+/** Keys the browser scrolls the page with. */
+const SCROLL_KEYS = new Set([" ", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"]);
+
 export default function ShortsFeed({
   channel,
   focusId,
@@ -717,7 +720,14 @@ export default function ShortsFeed({
       const t = e.target as HTMLElement | null;
       if (t?.closest("input, textarea, select, [contenteditable='true']")) return;
       // An open sheet has the keys even when focus stayed on the page behind it.
-      if (document.querySelector("[role='dialog'][aria-modal='true']")) return;
+      // The browser's own scrolling too: unhandled, an arrow or PageDown
+      // scrolls the snap container under the sheet. Keys inside the sheet
+      // (a scrolling comment list) keep their default.
+      const sheet = document.querySelector("[role='dialog'][aria-modal='true']");
+      if (sheet) {
+        if (SCROLL_KEYS.has(e.key) && !(t && sheet.contains(t))) e.preventDefault();
+        return;
+      }
       const id = activeId;
       switch (e.key) {
         case "ArrowDown":
