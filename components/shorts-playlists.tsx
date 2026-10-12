@@ -134,7 +134,11 @@ export default function ShortsPlaylists() {
                       onChange={(e) => setEditName(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") saveEdit(p);
-                        if (e.key === "Escape") setEditing(null);
+                        if (e.key === "Escape") {
+                          // Cancels the rename only, not a sheet around it.
+                          e.preventDefault();
+                          setEditing(null);
+                        }
                       }}
                       className="min-w-0 flex-1 rounded bg-white/10 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-white/40"
                     />

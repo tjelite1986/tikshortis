@@ -2,17 +2,24 @@
 
 import { useCallback, useEffect, useRef } from "react";
 
-type Report = { id: number; watchMs: number; completed: boolean };
+/** `continued`: see ViewReport in lib/views. */
+export type Report = { id: number; watchMs: number; completed: boolean; continued?: boolean };
 
 /**
  * Collects the cards' watch reports and sends them in batches: a few seconds
  * after the first one lands, and at once when the page is hidden (the only
  * reliable moment on a phone). sendBeacon survives navigation; fetch with
  * keepalive is the fallback for browsers without it.
+ *
+ * Cards report when they stop being active, which a closed tab or a reload
+ * never gets to. `live` hands over the active card's progress so far, and is
+ * read when the page is hidden.
  */
-export function useViewBeacon(enabled: boolean) {
+export function useViewBeacon(enabled: boolean, live?: () => Report | null) {
   const queue = useRef<Report[]>([]);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveRef = useRef(live);
+  liveRef.current = live;
 
   const flush = useCallback(() => {
     if (timer.current) {
@@ -22,7 +29,11 @@ export function useViewBeacon(enabled: boolean) {
     if (!queue.current.length) return;
     // Latest report per clip wins; the server keeps the max anyway.
     const byId = new Map<number, Report>();
-    for (const r of queue.current) byId.set(r.id, r);
+    // A batch that holds a fresh report for a clip still counts one view.
+    for (const r of queue.current) {
+      const prev = byId.get(r.id);
+      byId.set(r.id, prev ? { ...r, continued: !!prev.continued && !!r.continued } : r);
+    }
     queue.current = [];
     const body = JSON.stringify({ views: [...byId.values()].slice(-50) });
     try {
@@ -35,7 +46,7 @@ export function useViewBeacon(enabled: boolean) {
   }, []);
 
   const report = useCallback(
-    (id: number, r: { watchMs: number; completed: boolean }) => {
+    (id: number, r: { watchMs: number; completed: boolean; continued?: boolean }) => {
       if (!enabled) return;
       queue.current.push({ id, ...r });
       if (!timer.current) timer.current = setTimeout(flush, 4000);
@@ -45,14 +56,19 @@ export function useViewBeacon(enabled: boolean) {
 
   useEffect(() => {
     if (!enabled) return;
+    const flushWithLive = () => {
+      const r = liveRef.current?.();
+      if (r) queue.current.push(r);
+      flush();
+    };
     const onHide = () => {
-      if (document.visibilityState === "hidden") flush();
+      if (document.visibilityState === "hidden") flushWithLive();
     };
     document.addEventListener("visibilitychange", onHide);
-    window.addEventListener("pagehide", flush);
+    window.addEventListener("pagehide", flushWithLive);
     return () => {
       document.removeEventListener("visibilitychange", onHide);
-      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("pagehide", flushWithLive);
       flush();
     };
   }, [enabled, flush]);

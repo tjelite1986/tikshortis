@@ -65,3 +65,10 @@
 body.shorts-immersive [data-immersive-hide] {
   display: none !important;
 }
+
+/* While a modal sheet is open the feed does not scroll: not by keys (a sheet
+   inside a card hands an unhandled arrow or PageDown to the snap container),
+   wheel or touch. The sheet's own lists scroll as usual. */
+body:has([role="dialog"][aria-modal="true"]) [data-feed-scroller] {
+  overflow-y: hidden;
+}

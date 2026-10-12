@@ -33,8 +33,15 @@ export interface Ranked {
   reasons: Map<number, string>;
 }
 
-/** How many of the newest matching clips are scored; older ones wait a visit. */
-export const CANDIDATE_POOL = 4000;
+/**
+ * The candidate pool: the newest clips, plus older ones from creators the
+ * viewer has a pull towards, plus a fresh seeded sample of the rest each
+ * visit. Without the last two, everything past the newest few thousand
+ * never reached For You, a followed creator's back catalogue included.
+ */
+export const RECENT_POOL = 3000;
+const FAVOURITE_POOL = 1000;
+const BACKLOG_SAMPLE = 1000;
 
 const CACHE_TTL_MS = 15 * 60_000;
 const CACHE_MAX = 200;
@@ -47,6 +54,34 @@ function noise(id: number, seed: number): number {
   x = Math.imul(x, 0x5bd1e995) >>> 0;
   x ^= x >>> 15;
   return (x >>> 0) / 4294967296;
+}
+
+/**
+ * The older part of the pool, as clip ids: up to FAVOURITE_POOL from
+ * creators with a positive pull, then BACKLOG_SAMPLE of the rest, each a
+ * seeded draw. The noise is a real mix of id and seed, so every visit draws
+ * a different set (an affine hash in SQL only rotates one fixed order).
+ */
+export function pickBacklog(
+  older: { id: number; profile_id: number | null; uploader_id: number | null }[],
+  aff: Affinity,
+  seed: number
+): number[] {
+  const drawn = older
+    .map((c) => ({ c, r: noise(c.id, seed) }))
+    .sort((a, b) => a.r - b.r)
+    .map((x) => x.c);
+  const fav: number[] = [];
+  const rest: number[] = [];
+  for (const c of drawn) {
+    const key = creatorKey(c);
+    if (key && (aff.creators.get(key) ?? 0) > 0) {
+      if (fav.length < FAVOURITE_POOL) fav.push(c.id);
+    } else if (rest.length < BACKLOG_SAMPLE) {
+      rest.push(c.id);
+    }
+  }
+  return [...fav, ...rest];
 }
 
 /** Squashes a summed weight into (-1, 1) so one favourite cannot run away. */
@@ -253,7 +288,7 @@ export function rankedForVisit(
   viewerId: number,
   seed: number,
   filterKey: string,
-  loadCandidates: () => Candidate[]
+  loadCandidates: (aff: Affinity) => Candidate[]
 ): Ranked {
   const key = cacheKey(viewerId, seed, filterKey);
   const now = Date.now();
@@ -267,7 +302,7 @@ export function rankedForVisit(
 
   const aff = computeAffinity(viewerId);
   const history = viewHistory(viewerId);
-  const ranked = rankCandidates(loadCandidates(), aff, history, seed, now);
+  const ranked = rankCandidates(loadCandidates(aff), aff, history, seed, now);
 
   if (cache.size >= CACHE_MAX) {
     for (const [k, v] of cache) {

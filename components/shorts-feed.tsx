@@ -193,8 +193,11 @@ export default function ShortsFeed({
   // race each other (state, not a ref: the top sentinel re-arms on re-render).
   const [focusJumped, setFocusJumped] = useState(!effectiveFocus);
   const [activeId, setActiveId] = useState<number | null>(null);
+  // The active card's handle for the keyboard shortcuts and the hide-time
+  // watch report.
+  const activeApi = useRef<ShortCardApi | null>(null);
   // Watch reports from the cards, batched into the views beacon.
-  const reportView = useViewBeacon(true);
+  const reportView = useViewBeacon(true, () => activeApi.current?.watchSoFar() ?? null);
   // Resume: the main feed remembers the clip it was on, and a cold start
   // offers to go back there. Only the library-wide feed: a profile, playlist
   // or tag view is where you went on purpose. Resuming lands in the id-ordered
@@ -234,8 +237,6 @@ export default function ShortsFeed({
     return () => clearTimeout(t);
   }, [resume]);
 
-  // The active card's handle for the keyboard shortcuts.
-  const activeApi = useRef<ShortCardApi | null>(null);
   const registerApi = useCallback((api: ShortCardApi | null) => {
     activeApi.current = api;
   }, []);
@@ -716,6 +717,9 @@ export default function ShortsFeed({
       const t = e.target as HTMLElement | null;
       if (t?.closest("input, textarea, select, [contenteditable='true']")) return;
       // An open sheet has the keys even when focus stayed on the page behind it.
+      // The browser's own key scrolling is stopped by the scroller lock in
+      // globals.css, not here: a sheet inside a card would pass it on to the
+      // feed from a focused button, and a comment list must keep scrolling.
       if (document.querySelector("[role='dialog'][aria-modal='true']")) return;
       const id = activeId;
       switch (e.key) {
@@ -775,6 +779,7 @@ export default function ShortsFeed({
         // browser's pull-to-refresh (it reloaded the page mid-feed on Android).
         // overflow-anchor:none: loadPrev compensates the scroll itself; the
         // browser's native scroll anchoring would double the shift on prepend.
+        data-feed-scroller
         className="h-full w-full snap-y snap-mandatory overflow-y-scroll overscroll-y-contain [overflow-anchor:none]"
       >
         <div ref={topSentinelRef} className="h-px w-full" />
