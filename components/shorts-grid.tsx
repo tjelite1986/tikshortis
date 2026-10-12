@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Play, Heart, Pencil, Trash2, FolderInput, X, Plus, Check, Lock } from "lucide-react";
+import { Play, Heart, Pencil, Trash2, FolderInput, X, Plus, Check, Lock, Eye } from "lucide-react";
 import ShortsEditSheet from "@/components/shorts-edit-sheet";
 import { useBackDismiss } from "@/lib/use-back-dismiss";
 import { useConfirm } from "@/components/confirm-dialog";
@@ -36,6 +36,8 @@ interface GridShort {
   like_count: number;
   profile_name: string | null;
   is_private?: boolean;
+  // The viewer has watched it before. Optional for the same cache reason.
+  viewer_seen?: boolean;
   // Source dimensions, used to lay a wide clip out as a wide tile instead of
   // cropping it into the portrait one. Optional: tiles restored from an older
   // session cache predate these fields and fall back to portrait.
@@ -64,6 +66,7 @@ export default function ShortsGrid({
   isAdmin = false,
   lengthFilter = false,
   initialLength = "all",
+  initialUnseen = false,
 }: {
   query: Record<string, string>;
   hrefPrefix: string;
@@ -89,6 +92,8 @@ export default function ShortsGrid({
   // URL in the browser instead made the first client render disagree with the
   // server's, and React then left the wrong pill highlighted.
   initialLength?: LengthFilter;
+  // ?unseen=1 as requested; the toggle sits beside the length pills.
+  initialUnseen?: boolean;
 }) {
   const router = useRouter();
   const [items, setItems] = useState<GridShort[]>([]);
@@ -102,6 +107,7 @@ export default function ShortsGrid({
   // Clip length. switchLength writes it to the URL with replaceState, so a
   // Back-navigation re-requests the page with it and lands on the same slice.
   const [length, setLength] = useState<LengthFilter>(lengthFilter ? initialLength : "all");
+  const [unseen, setUnseen] = useState(lengthFilter ? initialUnseen : false);
   const [cols, switchCols] = useGridCols("shorts-grid-cols");
   // Shared by every inline clip: unmuting one keeps the next one audible.
   // Seeded from Settings > Playback, like the feed.
@@ -124,6 +130,7 @@ export default function ShortsGrid({
       url.searchParams.set("limit", "30");
       for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
       if (length !== "all") url.searchParams.set("length", length);
+      if (unseen) url.searchParams.set("unseen", "1");
       if (cursor) url.searchParams.set("cursor", String(cursor));
       const token = ++loadToken.current;
       const res = await fetch(url.toString());
@@ -151,7 +158,7 @@ export default function ShortsGrid({
       setLoading(false);
       setLoadedOnce(true);
     }
-  }, [cursor, hasMore, loading, query, length]);
+  }, [cursor, hasMore, loading, query, length, unseen]);
 
   // Latest state, for the click-time cache save (the closure would otherwise
   // capture stale values).
@@ -237,13 +244,11 @@ export default function ShortsGrid({
   // in flight, and let the effect below fetch the first page of the new slice.
   // The URL gets ?length via replaceState (no navigation), so Back returns here
   // with the filter intact — and the tile links carry it into the feed.
-  const switchLength = (l: LengthFilter) => {
-    if (l === length) return;
+  const restartWith = (patch: (url: URL) => void) => {
     loadToken.current++;
     if (typeof window !== "undefined") {
       const url = new URL(window.location.href);
-      if (l === "all") url.searchParams.delete("length");
-      else url.searchParams.set("length", l);
+      patch(url);
       window.history.replaceState(window.history.state, "", url.toString());
     }
     setLoading(false);
@@ -252,7 +257,22 @@ export default function ShortsGrid({
     setHasMore(true);
     setLoadedOnce(false);
     window.scrollTo(0, 0);
+  };
+  const switchLength = (l: LengthFilter) => {
+    if (l === length) return;
+    restartWith((url) => {
+      if (l === "all") url.searchParams.delete("length");
+      else url.searchParams.set("length", l);
+    });
     setLength(l);
+  };
+  const toggleUnseen = () => {
+    const next = !unseen;
+    restartWith((url) => {
+      if (next) url.searchParams.set("unseen", "1");
+      else url.searchParams.delete("unseen");
+    });
+    setUnseen(next);
   };
 
   // First page of a newly picked filter. Skipped on mount — the effect above
@@ -265,7 +285,7 @@ export default function ShortsGrid({
     }
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [length]);
+  }, [length, unseen]);
 
   useEffect(() => {
     const el = sentinel.current;
@@ -336,6 +356,20 @@ export default function ShortsGrid({
             {LENGTH_LABELS[l]}
           </button>
         ))}
+      {lengthFilter && (
+        <button
+          onClick={toggleUnseen}
+          aria-pressed={unseen}
+          className={
+            unseen
+              ? "flex items-center gap-1 rounded-full bg-white px-3 py-1.5 text-sm font-semibold text-black"
+              : "flex items-center gap-1 rounded-full bg-white/10 px-3 py-1.5 text-sm text-white/70 transition hover:bg-white/15"
+          }
+        >
+          <Eye size={14} />
+          Unseen
+        </button>
+      )}
       <GridDensity cols={cols} onChange={switchCols} className="ml-auto" />
     </div>
   );
@@ -347,9 +381,11 @@ export default function ShortsGrid({
         <p className="px-4 py-16 text-center text-sm text-white/50">
           {/* The surface's own empty text would claim there is nothing here at
               all, which is false when a filter is what emptied it. */}
-          {length === "all"
-            ? empty
-            : `No ${LENGTH_LABELS[length].toLowerCase()} clips here.`}
+          {unseen
+            ? "You have seen everything here."
+            : length === "all"
+              ? empty
+              : `No ${LENGTH_LABELS[length].toLowerCase()} clips here.`}
         </p>
       </>
     );
@@ -420,6 +456,14 @@ export default function ShortsGrid({
               );
               const overlay = (
                 <>
+                  {s.viewer_seen && !unseen && (
+                    <div
+                      className="pointer-events-none absolute right-1 top-1 rounded bg-black/65 p-1 text-white/80"
+                      title="Seen"
+                    >
+                      <Eye size={12} />
+                    </div>
+                  )}
                   {s.is_private && (
                     <div className="pointer-events-none absolute left-1 top-1 rounded bg-black/65 p-1 text-amber-300">
                       <Lock size={12} />

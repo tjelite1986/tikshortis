@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 // Browse all clips as a grid; tapping one opens the immersive feed there.
 export default async function ExplorePage(props: {
-  searchParams: Promise<{ length?: string }>;
+  searchParams: Promise<{ length?: string; unseen?: string }>;
 }) {
   const [session, searchParams] = await Promise.all([getSession(), props.searchParams]);
   return (
@@ -18,6 +18,7 @@ export default async function ExplorePage(props: {
         restoreKey="explore:main"
         lengthFilter
         initialLength={parseShortsLength(searchParams.length ?? null)}
+        initialUnseen={searchParams.unseen === "1"}
         isAdmin={session?.role === "admin"}
       />
     </div>

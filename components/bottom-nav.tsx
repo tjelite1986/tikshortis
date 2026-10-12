@@ -12,6 +12,7 @@ import {
   Hash,
   Sparkles,
   Clapperboard,
+  History,
   Upload,
   Download,
   Settings,
@@ -69,6 +70,7 @@ export default function BottomNav({
     { label: "Categories", href: "/tags", icon: Hash },
     { label: "Analysis", href: "/analysis", icon: Sparkles },
     { label: "Mine", href: "/mine", icon: Clapperboard },
+    { label: "History", href: "/history", icon: History },
     { label: "Upload", href: "/upload", icon: Upload },
     ...(isAdmin ? [{ label: "Grab", href: "/grab", icon: Download }] : []),
     // Playback preferences live here, so every viewer gets the door; the

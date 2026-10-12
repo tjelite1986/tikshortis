@@ -63,6 +63,12 @@ function fmtTime(s: number): string {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
+export interface ShortCardApi {
+  togglePlay: () => void;
+  like: () => void;
+  openSave: () => void;
+}
+
 export interface FeedShort {
   id: number;
   channel: string;
@@ -160,6 +166,8 @@ export default function ShortCard({
   onEnded,
   onRemoved,
   onHidden,
+  onViewed,
+  registerApi,
 }: {
   short: FeedShort;
   active: boolean;
@@ -191,6 +199,13 @@ export default function ShortCard({
   playbackRate?: number;
   onSetPlaybackRate?: (rate: number) => void;
   onEnded?: () => void;
+  // Watch report, once per stretch on screen: fired when the card stops being
+  // the active one (or unmounts) with how far the clip got and whether it
+  // reached the end. The feed batches these into the views beacon.
+  onViewed?: (id: number, report: { watchMs: number; completed: boolean }) => void;
+  // While active, the card hands the feed a handle for the keyboard: play/pause,
+  // like, open the save sheet. Called with null when it stops being active.
+  registerApi?: (api: ShortCardApi | null) => void;
   // Called after the clip left this feed (moved to the other channel, or
   // deleted) so the parent can drop the card and snap to the next clip.
   onRemoved?: (id: number) => void;
@@ -201,6 +216,11 @@ export default function ShortCard({
   onHidden?: (id: number, hidden: boolean, label?: string) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Furthest point reached and whether the end was seen, for the watch
+  // report. Refs, not state: they change on every timeupdate.
+  const watch = useRef({ maxTime: 0, lastTime: 0, completed: false, wasActive: false });
+  const onViewedRef = useRef(onViewed);
+  onViewedRef.current = onViewed;
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -525,6 +545,50 @@ export default function ShortCard({
   // `v.muted` is kept current by the effect below, so it is read from the
   // element rather than listed as a dependency: a mute toggle must not restart
   // a clip the viewer paused.
+  // The keyboard handle, registered for as long as the card is active. The
+  // functions read refs and setters, so a stale closure cannot act on an old
+  // clip.
+  const apiRef = useRef<ShortCardApi>({ togglePlay: () => {}, like: () => {}, openSave: () => {} });
+  useEffect(() => {
+    if (!active || !registerApi) return;
+    const api: ShortCardApi = {
+      togglePlay: () => apiRef.current.togglePlay(),
+      like: () => apiRef.current.like(),
+      openSave: () => apiRef.current.openSave(),
+    };
+    registerApi(api);
+    return () => registerApi(null);
+  }, [active, registerApi]);
+
+  // One report per stretch as the active card. A loop restart (currentTime
+  // jumping back) counts as having reached the end, since `loop` suppresses
+  // the ended event.
+  useEffect(() => {
+    const w = watch.current;
+    if (active) {
+      w.maxTime = 0;
+      w.lastTime = 0;
+      w.completed = false;
+      w.wasActive = true;
+      return;
+    }
+    if (!w.wasActive) return;
+    w.wasActive = false;
+    if (w.maxTime > 0 || w.completed) {
+      onViewedRef.current?.(short.id, { watchMs: w.maxTime * 1000, completed: w.completed });
+    }
+  }, [active, short.id]);
+  useEffect(() => {
+    // The ref object itself is stable; its fields are read at cleanup on
+    // purpose, since that is when the final figures are known.
+    const w = watch.current;
+    return () => {
+      if (w.wasActive && (w.maxTime > 0 || w.completed)) {
+        onViewedRef.current?.(short.id, { watchMs: w.maxTime * 1000, completed: w.completed });
+      }
+    };
+  }, [short.id]);
+
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -582,6 +646,17 @@ export default function ShortCard({
       setLiked(prevLiked);
       setLikeCount((c) => c + (next ? -1 : 1));
     }
+  };
+
+  apiRef.current = {
+    togglePlay: () => {
+      const v = videoRef.current;
+      if (!v) return;
+      if (v.paused) v.play().catch(() => {});
+      else v.pause();
+    },
+    like: () => void toggleLike(),
+    openSave: () => setShowSave(true),
   };
 
   const triggerBurst = () => {
@@ -665,7 +740,10 @@ export default function ShortCard({
         poster={short.has_poster ? `/api/shorts/${short.id}/poster?v=${short.poster_v ?? "2"}` : undefined}
         className="h-full w-full object-contain"
         loop={!autoAdvance}
-        onEnded={() => autoAdvance && onEnded?.()}
+        onEnded={() => {
+          watch.current.completed = true;
+          if (autoAdvance) onEnded?.();
+        }}
         muted={muted}
         playsInline
         preload={active || next ? "auto" : "metadata"}
@@ -681,6 +759,15 @@ export default function ShortCard({
         onTimeUpdate={(e) => {
           const v = e.currentTarget;
           if (v.duration) setProgress((v.currentTime / v.duration) * 100);
+          const w = watch.current;
+          // Jumped back by more than a second while near the end: the loop
+          // wrapped, so the clip played through.
+          if (v.currentTime + 1 < w.lastTime && w.lastTime >= (v.duration || Infinity) * 0.9) {
+            w.completed = true;
+          }
+          w.lastTime = v.currentTime;
+          if (v.currentTime > w.maxTime) w.maxTime = v.currentTime;
+          if (v.duration && v.currentTime >= v.duration * 0.95) w.completed = true;
         }}
       />
 

@@ -10,6 +10,7 @@ import {
 import { kindForUrl, linkUrlKey, parseLinkUrl } from "./profile-links";
 import { qb, getOne, getAll } from "./kysely";
 import { personContentIds } from "./people";
+import { CANDIDATE_POOL, rankedForVisit, type Candidate } from "./ranking";
 
 // This app serves one channel. The column and this parser survived the move out
 // of elite-v2 because the schema, the storage keys and the maintenance scripts
@@ -59,13 +60,16 @@ export type ShortsSort =
   | "foryou"
   | "following"
   | "liked"
-  | "random";
+  | "random"
+  // Clips the viewer has watched, most recently watched first.
+  | "history";
 
 export function parseShortsSort(raw: string | null): ShortsSort {
   return raw === "foryou" ||
     raw === "following" ||
     raw === "liked" ||
-    raw === "random"
+    raw === "random" ||
+    raw === "history"
     ? raw
     : "new";
 }
@@ -148,6 +152,8 @@ export interface FeedShort {
   viewer_hidden: boolean;
   // The viewer has an open report on this clip (the menu row reads "Reported").
   viewer_reported: boolean;
+  // The viewer has watched this clip before (any stretch of it).
+  viewer_seen: boolean;
   // "Why this post": one sentence on why the feed put this clip here — the
   // ordering mode's own criterion, or the follow/like/save that pulled it in.
   // Null when the view itself is the reason (a profile page, a person page).
@@ -170,6 +176,7 @@ interface FeedRow extends ShortRow {
   viewer_saved: number;
   viewer_hidden: number;
   viewer_reported: number;
+  viewer_seen: number;
 }
 
 // Compact, stable token for a poster file key (djb2 → base36). Changes whenever
@@ -257,6 +264,36 @@ function feedReason(
     : `Added ${added}; this feed shows the newest first.`;
 }
 
+/** The wire shape of one feed row, with the reason the feed gives for it. */
+function toFeedShort(r: FeedRow, why: string | null): FeedShort {
+  return {
+    id: r.id,
+    channel: r.channel,
+    caption: r.caption,
+    uploader_id: r.uploader_id,
+    uploader_name: r.uploader_name,
+    profile_id: r.profile_id,
+    profile_name: r.profile_name,
+    width: r.width,
+    height: r.height,
+    duration: r.duration,
+    created_at: r.created_at,
+    source: r.source,
+    source_id: r.source_id,
+    like_count: Number(r.like_count),
+    comment_count: Number(r.comment_count),
+    viewer_liked: Boolean(r.viewer_liked),
+    viewer_saved: Boolean(r.viewer_saved),
+    viewer_hidden: Boolean(r.viewer_hidden),
+    viewer_reported: Boolean(r.viewer_reported),
+    viewer_seen: Boolean(r.viewer_seen),
+    why,
+    has_poster: Boolean(r.poster_key),
+    poster_v: r.poster_key ? posterVersion(r.poster_key) : null,
+    is_private: Boolean(r.is_private),
+  };
+}
+
 // Cursor-paginated feed, newest first. The cursor is the last short id seen (ids
 // are monotonic). Scope is either a whole channel or a single profile (when
 // profileId is set, the channel filter is dropped — the caller gates 18+ access
@@ -304,9 +341,14 @@ export function getFeed(
   mentionedIds: number[] = [],
   // Clip-length scope: "short" / "long" split at SHORT_MAX_SECONDS, "all" (the
   // default) leaves the length alone.
-  length: ShortsLength = "all"
+  length: ShortsLength = "all",
+  // Only clips the viewer has not watched yet.
+  unseen = false
 ): { items: FeedShort[]; nextCursor: number | null } {
-  const offsetMode = sort === "foryou" || sort === "random";
+  // "random" pages by offset into a seeded order, "history" by offset into
+  // the watched order; "foryou" pages by offset into a ranked list cached for
+  // the visit (see lib/ranking.ts).
+  const offsetMode = sort === "random" || sort === "history";
   // Keep the seed inside SQLite's integer math comfort zone.
   const s32 = Math.abs(Math.floor(seed)) % 2147483647;
   const profIds = profileId !== null ? [profileId, ...profileIds] : [...profileIds];
@@ -328,7 +370,7 @@ export function getFeed(
   // Structure (joins, filters, ordering, pagination) is built with the typed
   // builder. The correlated count/exists columns stay as sql`` fragments —
   // this is exactly the "gnarliest queries fall partly back to raw SQL" case.
-  const query = qb
+  const base = qb
     .selectFrom("shorts as s")
     .leftJoin("users as u", "u.id", "s.uploader_id")
     .leftJoin("short_profiles as p", "p.id", "s.profile_id")
@@ -369,6 +411,9 @@ export function getFeed(
       ),
       sql<number>`EXISTS(SELECT 1 FROM short_reports rp WHERE rp.short_id = s.id AND rp.user_id = ${viewerId} AND rp.resolved_at IS NULL)`.as(
         "viewer_reported"
+      ),
+      sql<number>`EXISTS(SELECT 1 FROM short_views v WHERE v.short_id = s.id AND v.user_id = ${viewerId})`.as(
+        "viewer_seen"
       ),
     ])
     .where("s.is_deleted", "=", 0)
@@ -419,6 +464,18 @@ export function getFeed(
       q.where("s.duration", "<=", SHORT_MAX_SECONDS)
     )
     .$if(length === "long", (q) => q.where("s.duration", ">", SHORT_MAX_SECONDS))
+    // Unseen: nothing with a watch row, however short the stretch was.
+    .$if(unseen, (q) =>
+      q.where(
+        sql<boolean>`NOT EXISTS(SELECT 1 FROM short_views v WHERE v.short_id = s.id AND v.user_id = ${viewerId})`
+      )
+    )
+    // History: only what the viewer has watched; ordered below by when.
+    .$if(sort === "history", (q) =>
+      q.where(
+        sql<boolean>`EXISTS(SELECT 1 FROM short_views v WHERE v.short_id = s.id AND v.user_id = ${viewerId})`
+      )
+    )
     // Hashtag scope: caption contains "#tag". Matches the hashtag followed by a
     // word boundary (a trailing space is appended so an end-of-caption tag also
     // matches) so #cat doesn't also surface #caturday.
@@ -469,26 +526,82 @@ export function getFeed(
               ].filter((c): c is NonNullable<typeof c> => c !== null)
             )
           )
-    )
+    );
+
+  const now = new Date();
+
+  // For You: the filters above pick the candidates, the ranker orders them,
+  // and the page is a slice of that order. The ranking is computed once per
+  // visit (viewer + seed + filters) so later pages line up with earlier ones.
+  if (sort === "foryou") {
+    const filterKey = JSON.stringify({
+      profIds,
+      ownIds,
+      mentIds,
+      playlistId,
+      mineOnly,
+      isAdmin,
+      tag,
+      length,
+      unseen,
+    });
+    const ranked = rankedForVisit(viewerId, s32, filterKey, () =>
+      getAll<Candidate>(
+        base
+          .clearSelect()
+          .select([
+            "s.id",
+            "s.profile_id",
+            "s.uploader_id",
+            "p.name as profile_name",
+            sql<string | null>`COALESCE(u.display_name, u.username)`.as("uploader_name"),
+            "s.caption",
+            "s.created_at",
+            sql<number>`(SELECT COUNT(*) FROM short_likes l WHERE l.short_id = s.id)`.as(
+              "like_count"
+            ),
+            sql<number>`(SELECT COUNT(*) FROM short_comments c WHERE c.short_id = s.id)`.as(
+              "comment_count"
+            ),
+            sql<number>`(EXISTS(SELECT 1 FROM short_likes l WHERE l.short_id = s.id AND l.user_id = ${viewerId})
+              OR EXISTS(SELECT 1 FROM short_playlist_items pi JOIN short_playlists pl ON pl.id = pi.playlist_id WHERE pi.short_id = s.id AND pl.user_id = ${viewerId}))`.as(
+              "viewer_engaged"
+            ),
+          ])
+          .orderBy("s.id", "desc")
+          .limit(CANDIDATE_POOL)
+      )
+    );
+    const offset = Math.max(0, cursor ?? 0);
+    const pageIds = ranked.ids.slice(offset, offset + limit);
+    const rows = pageIds.length
+      ? getAll<FeedRow>(base.where("s.id", "in", pageIds))
+      : [];
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const items = pageIds
+      .map((id) => byId.get(id))
+      .filter((r): r is FeedRow => r !== undefined)
+      .map((r) => toFeedShort(r, ranked.reasons.get(r.id) ?? null));
+    const hasMore = ranked.ids.length > offset + pageIds.length;
+    return { items, nextCursor: hasMore ? offset + pageIds.length : null };
+  }
+
+  const query = base
     // Cursor cut / backward mode only make sense for id-ordered feeds; the
-    // seeded orders paginate by offset instead.
+    // seeded order paginates by offset instead.
     .$if(!offsetMode && cursor !== null, (q) => q.where("s.id", "<", cursor!))
     // Backward mode: ascending picks the ids immediately above `after` (not the
     // newest overall); the page is flipped back to newest-first below.
     .$if(!offsetMode && after !== null, (q) => q.where("s.id", ">", after!))
     // A deterministic per-seed shuffle: SQLite has no seeded RANDOM(), so an
     // LCG-style hash of the id gives a stable order for one seed and a fresh
-    // one for the next visit. "For you" weighs engagement on top of it.
+    // one for the next visit.
     .$if(sort === "random", (q) =>
       q.orderBy(sql`((s.id * 1103515245 + ${s32}) % 2147483647)`)
     )
-    .$if(sort === "foryou", (q) =>
+    .$if(sort === "history", (q) =>
       q.orderBy(
-        sql`(
-          (SELECT COUNT(*) FROM short_likes l2 WHERE l2.short_id = s.id) * 40
-          + (SELECT COUNT(*) FROM short_comments c2 WHERE c2.short_id = s.id) * 25
-          + (((s.id * 1103515245 + ${s32}) % 97) + 97) % 97
-        ) DESC`
+        sql`(SELECT v.last_viewed_at FROM short_views v WHERE v.short_id = s.id AND v.user_id = ${viewerId}) DESC`
       )
     )
     .orderBy("s.id", after !== null ? "asc" : "desc")
@@ -496,7 +609,6 @@ export function getFeed(
     .limit(limit + 1);
 
   const rows = getAll<FeedRow>(query);
-  const now = new Date();
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
@@ -505,39 +617,20 @@ export function getFeed(
   const pageEndId = page.length ? page[page.length - 1].id : null;
   if (after !== null) page.reverse();
 
-  const items: FeedShort[] = page.map((r) => ({
-    id: r.id,
-    channel: r.channel,
-    caption: r.caption,
-    uploader_id: r.uploader_id,
-    uploader_name: r.uploader_name,
-    profile_id: r.profile_id,
-    profile_name: r.profile_name,
-    width: r.width,
-    height: r.height,
-    duration: r.duration,
-    created_at: r.created_at,
-    source: r.source,
-    source_id: r.source_id,
-    like_count: Number(r.like_count),
-    comment_count: Number(r.comment_count),
-    viewer_liked: Boolean(r.viewer_liked),
-    viewer_saved: Boolean(r.viewer_saved),
-    viewer_hidden: Boolean(r.viewer_hidden),
-    viewer_reported: Boolean(r.viewer_reported),
-    why: feedReason(r, {
-      sort,
-      tag,
-      scoped,
-      playlistId,
-      mineOnly,
-      followScope,
-      now,
-    }),
-    has_poster: Boolean(r.poster_key),
-    poster_v: r.poster_key ? posterVersion(r.poster_key) : null,
-    is_private: Boolean(r.is_private),
-  }));
+  const items: FeedShort[] = page.map((r) =>
+    toFeedShort(
+      r,
+      feedReason(r, {
+        sort,
+        tag,
+        scoped,
+        playlistId,
+        mineOnly,
+        followScope,
+        now,
+      })
+    )
+  );
 
   // Offset mode: the "cursor" is simply where the next page starts.
   const nextCursor = hasMore
