@@ -68,9 +68,9 @@ const CREATOR_VERB: Record<Source, string> = {
 };
 /** "Tagged #t, ___." */
 const TAG_PHRASE: Record<Source, string> = {
-  like: "like clips you liked",
-  save: "like clips you saved",
-  comment: "like clips you commented on",
+  like: "as are clips you liked",
+  save: "as are clips you saved",
+  comment: "as are clips you commented on",
   watch: "which you watch",
 };
 
