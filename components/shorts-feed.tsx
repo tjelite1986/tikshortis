@@ -63,9 +63,6 @@ const LENGTH_LABELS: Record<LengthFilter, string> = {
 };
 const LENGTH_ORDER: readonly LengthFilter[] = ["all", "short", "long"];
 
-/** Keys the browser scrolls the page with. */
-const SCROLL_KEYS = new Set([" ", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"]);
-
 export default function ShortsFeed({
   channel,
   focusId,
@@ -720,14 +717,10 @@ export default function ShortsFeed({
       const t = e.target as HTMLElement | null;
       if (t?.closest("input, textarea, select, [contenteditable='true']")) return;
       // An open sheet has the keys even when focus stayed on the page behind it.
-      // The browser's own scrolling too: unhandled, an arrow or PageDown
-      // scrolls the snap container under the sheet. Keys inside the sheet
-      // (a scrolling comment list) keep their default.
-      const sheet = document.querySelector("[role='dialog'][aria-modal='true']");
-      if (sheet) {
-        if (SCROLL_KEYS.has(e.key) && !(t && sheet.contains(t))) e.preventDefault();
-        return;
-      }
+      // The browser's own key scrolling is stopped by the scroller lock in
+      // globals.css, not here: a sheet inside a card would pass it on to the
+      // feed from a focused button, and a comment list must keep scrolling.
+      if (document.querySelector("[role='dialog'][aria-modal='true']")) return;
       const id = activeId;
       switch (e.key) {
         case "ArrowDown":
@@ -786,6 +779,7 @@ export default function ShortsFeed({
         // browser's pull-to-refresh (it reloaded the page mid-feed on Android).
         // overflow-anchor:none: loadPrev compensates the scroll itself; the
         // browser's native scroll anchoring would double the shift on prepend.
+        data-feed-scroller
         className="h-full w-full snap-y snap-mandatory overflow-y-scroll overscroll-y-contain [overflow-anchor:none]"
       >
         <div ref={topSentinelRef} className="h-px w-full" />
