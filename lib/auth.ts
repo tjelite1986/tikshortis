@@ -136,11 +136,21 @@ export function isAdmin(session: Session | null): boolean {
  * those authenticate with the admin token instead and never reach here with a
  * cookie, so a missing Origin fails closed.
  */
+/**
+ * The host the browser asked for. Not `request.url`: the standalone server
+ * builds that from the address it is bound to (`0.0.0.0:3000`), so behind the
+ * proxy it never matches a real Origin. The proxy passes the Host header
+ * through, and middleware.ts reads the same header.
+ */
+function requestHost(request: Request): string {
+  return request.headers.get("host") ?? new URL(request.url).host;
+}
+
 export function sameOrigin(request: Request): boolean {
   const origin = request.headers.get("origin");
   if (!origin) return false;
   try {
-    return new URL(origin).host === new URL(request.url).host;
+    return new URL(origin).host === requestHost(request);
   } catch {
     return false;
   }
@@ -162,7 +172,7 @@ export function sameOriginPage(request: Request): boolean {
   const referer = request.headers.get("referer");
   if (!referer) return false;
   try {
-    return new URL(referer).host === new URL(request.url).host;
+    return new URL(referer).host === requestHost(request);
   } catch {
     return false;
   }
