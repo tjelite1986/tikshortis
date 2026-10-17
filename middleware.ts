@@ -2,13 +2,12 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 /**
- * Cross-site request forgery, for a cookie this app did not set.
+ * Cross-site request forgery.
  *
- * The session cookie belongs to elite-v2 and is scoped to the parent domain, so
- * the browser attaches it to requests for THIS host on its own — and
- * `SameSite=lax` does not help here, because every page on that parent domain
- * counts as the same site. Any page served anywhere on that domain could
- * therefore make an authenticated write to these routes.
+ * The session cookie is host-only, but `SameSite=lax` still attaches it to a
+ * request from any page on the parent domain, because every page on that
+ * domain counts as the same site. Any page served anywhere on that domain
+ * could therefore make an authenticated write to these routes.
  *
  * So a state-changing request has to prove it came from a page this host
  * served. The check lives in middleware rather than in each route because a

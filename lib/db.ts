@@ -46,12 +46,11 @@ function createDb(): Database.Database {
 
 function migrate(db: Database.Database) {
   db.exec(`
-    -- Accounts are NOT owned here. Sign-in belongs to elite-v2 (see lib/sso.ts):
-    -- this table is a local mirror of the accounts that have actually been seen,
-    -- written on every successful verify. It exists because a clip, a like or a
-    -- comment has to render a name and an avatar without a round trip, and
-    -- because the id it stores is elite-v2's id — the same integer the migrated
-    -- rows already carry. Nothing here is a credential.
+    -- The app's own accounts (see lib/auth.ts). They began as a mirror of
+    -- elite-v2's, keyed by its ids — the same integers the migrated rows carry —
+    -- and became the real thing when that app was shut down. No sign-up page:
+    -- accounts are made with scripts/users.cjs. A NULL password_hash is an
+    -- account that cannot sign in.
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY,
       email TEXT NOT NULL,
@@ -59,8 +58,19 @@ function migrate(db: Database.Database) {
       username TEXT,
       display_name TEXT,
       avatar_url TEXT,
-      synced_at TEXT NOT NULL DEFAULT (datetime('now'))
+      synced_at TEXT NOT NULL DEFAULT (datetime('now')),
+      password_hash TEXT
     );
+
+    -- Only the SHA-256 of a session token is stored, so a copy of this file is
+    -- not a set of live logins.
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
     -- Per-section capabilities an admin can grant an individual account.
     -- Admins hold every permission implicitly (no rows needed).
@@ -394,6 +404,23 @@ function migrate(db: Database.Database) {
     }
   }
 
+  const userColumns = (
+    db.prepare("PRAGMA table_info(users)").all() as { name: string }[]
+  ).map((c) => c.name);
+  if (!userColumns.includes("password_hash")) {
+    try {
+      db.exec("ALTER TABLE users ADD COLUMN password_hash TEXT");
+    } catch (e) {
+      if (!String(e).includes("duplicate column name")) throw e;
+    }
+  }
+  // The email is the sign-in name, so two rows with the same one would make
+  // the login pick between them. Created after the column above, on a table
+  // that has only ever held elite-v2's already-unique addresses.
+  db.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE)"
+  );
+
   const profileColumns = (
     db.prepare("PRAGMA table_info(short_profiles)").all() as { name: string }[]
   ).map((c) => c.name);
@@ -469,6 +496,7 @@ export interface UserRow {
   display_name: string | null;
   avatar_url: string | null;
   synced_at: string;
+  password_hash: string | null;
 }
 
 export interface ShortRow {

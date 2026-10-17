@@ -1,21 +1,16 @@
-import { NextResponse } from "next/server";
-import { loginUrl } from "@/lib/sso";
+import { safeNext } from "@/lib/safe-next";
 
 export const dynamic = "force-dynamic";
 
 /**
- * There is no sign-in form here — the accounts are elite-v2's. This exists so
- * that `/login` is a real address: the ported pages redirect to it when they
- * find no session, and a bookmark or a stale link lands somewhere that works
- * instead of on a 404.
- *
- * `next` is only ever a path on this host. It is not read from the request:
- * a caller-supplied return address is exactly what turns a login hop into an
- * open redirect, and there is nothing here worth that.
+ * The sign-in form is drawn by the root layout on any page a signed-out
+ * visitor opens, so it signs them in where they stand. This exists so that
+ * `/login` is still a real address: pages redirect here when they find no
+ * session, and it sends them back to the page they wanted, where the form is.
  */
 export function GET(request: Request) {
-  const path = new URL(request.url).searchParams.get("next");
-  const safe = path && path.startsWith("/") && !path.startsWith("//") ? path : "/";
-  const target = loginUrl(safe);
-  return NextResponse.redirect(target || new URL("/", request.url), 302);
+  const next = safeNext(new URL(request.url).searchParams.get("next"));
+  // A relative Location: behind the proxy, request.url carries the container's
+  // own address rather than the public one.
+  return new Response(null, { status: 302, headers: { location: next } });
 }

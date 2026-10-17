@@ -1,13 +1,28 @@
 import { cookies, headers } from "next/headers";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { db, UserRow } from "./db";
 import { qb, getOne } from "./kysely";
-import { SESSION_COOKIE, verifyToken, type Appearance } from "./sso";
+
+/**
+ * Who is browsing.
+ *
+ * The app keeps its own accounts: `users` and `sessions` in its own database.
+ * It used to borrow elite-v2's login over HTTP; that app is gone, and the
+ * account ids were already elite-v2's, so every like, upload and playlist still
+ * belongs to the same person.
+ *
+ * A session is a random token in an HttpOnly cookie. Only its SHA-256 is
+ * stored, so signing out — or deleting the row — ends it on the next request.
+ * The cookie is scoped to this host alone: no `Domain`, so nothing else under
+ * the parent domain receives it.
+ */
+export const SESSION_COOKIE = "tikshortis_session";
+const SESSION_DAYS = 30;
 
 /**
  * The session shape the rest of the app reads.
  *
- * `sub` is a string for the same reason it was one in elite-v2 — it comes from
+ * `sub` is a string for the same reason it was one in elite-v2 — it came from
  * a JWT subject — and every caller already does `Number(session.sub)`. Keeping
  * the name and the type means the ported code did not have to change.
  */
@@ -18,63 +33,92 @@ export interface Session {
   username: string | null;
   displayName: string | null;
   avatarUrl: string | null;
-  appearance?: Appearance;
 }
 
-/**
- * Mirror the account elite-v2 just vouched for.
- *
- * The row is what lets a comment or an upload render a name without a second
- * round trip, and it is refreshed on every verify rather than written once:
- * a rename in elite-v2 has to reach the clips filed under the old handle.
- */
-function mirrorUser(user: {
-  id: number;
-  email: string;
-  role: string;
-  username?: string | null;
-  displayName?: string | null;
-  avatarUrl?: string | null;
-}): void {
-  db.prepare(
-    `INSERT INTO users (id, email, role, username, display_name, avatar_url, synced_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(id) DO UPDATE SET
-       email = excluded.email,
-       role = excluded.role,
-       username = COALESCE(excluded.username, users.username),
-       display_name = COALESCE(excluded.display_name, users.display_name),
-       avatar_url = excluded.avatar_url,
-       synced_at = excluded.synced_at`
-  ).run(
-    user.id,
-    user.email,
-    user.role,
-    user.username ?? null,
-    user.displayName ?? null,
-    user.avatarUrl ?? null
-  );
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 /**
  * Read the current session from the request cookies. Works in server
  * components and route handlers alike (Node runtime, not edge).
+ *
+ * The cookie is looked for before the database is touched: a signed-out
+ * request never opens it.
  */
 export async function getSession(): Promise<Session | null> {
   const token = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!token) return null;
-  const user = await verifyToken(token);
-  if (!user) return null;
-  mirrorUser(user);
+  const row = db
+    .prepare(
+      `SELECT u.id, u.email, u.role, u.username, u.display_name, u.avatar_url
+         FROM sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.token_hash = ? AND s.expires_at > ?`
+    )
+    .get(hashToken(token), new Date().toISOString()) as
+    | Pick<UserRow, "id" | "email" | "role" | "username" | "display_name" | "avatar_url">
+    | undefined;
+  if (!row) return null;
   return {
-    sub: String(user.id),
-    email: user.email,
-    role: user.role,
-    username: user.username ?? null,
-    displayName: user.displayName ?? null,
-    avatarUrl: user.avatarUrl ?? null,
-    appearance: user.appearance,
+    sub: String(row.id),
+    email: row.email,
+    role: row.role === "admin" ? "admin" : "user",
+    username: row.username,
+    displayName: row.display_name,
+    avatarUrl: row.avatar_url,
   };
+}
+
+export function startSession(userId: number): { token: string; expires: Date } {
+  const token = randomBytes(32).toString("base64url");
+  const now = new Date();
+  const expires = new Date(now.getTime() + SESSION_DAYS * 86_400_000);
+  // Expired rows are swept here rather than on a timer: a login is rare, and
+  // nothing else ever reads a session that has run out.
+  db.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(now.toISOString());
+  db.prepare(
+    "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)"
+  ).run(hashToken(token), userId, now.toISOString(), expires.toISOString());
+  return { token, expires };
+}
+
+export function endSession(token: string): void {
+  db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(hashToken(token));
+}
+
+/**
+ * Whether the browser reached us over HTTPS. The reverse proxy terminates TLS,
+ * so the request this app sees is plain HTTP and the original scheme is a
+ * header. A cookie marked Secure on a plain-HTTP LAN address would never come
+ * back.
+ */
+function overHttps(request: Request): boolean {
+  return (
+    request.headers.get("x-forwarded-proto") === "https" ||
+    new URL(request.url).protocol === "https:"
+  );
+}
+
+export function sessionCookie(request: Request, token: string, expires: Date): string {
+  return [
+    `${SESSION_COOKIE}=${token}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Expires=${expires.toUTCString()}`,
+    ...(overHttps(request) ? ["Secure"] : []),
+  ].join("; ");
+}
+
+export function clearedSessionCookie(request: Request): string {
+  return [
+    `${SESSION_COOKIE}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    "Max-Age=0",
+    ...(overHttps(request) ? ["Secure"] : []),
+  ].join("; ");
 }
 
 export function isAdmin(session: Session | null): boolean {
@@ -84,18 +128,29 @@ export function isAdmin(session: Session | null): boolean {
 /**
  * A cookie is attached by the browser on its own, and `SameSite=lax` does not
  * separate this host from any other on the parent domain — every page on it is
- * the same site. So a state-changing request has to prove it came from a page
- * served by THIS host. Reads skip the check.
+ * the same site, and can send a request here that carries our cookie. So a
+ * state-changing request has to prove it came from a page served by THIS host.
+ * Reads skip the check.
  *
  * A request with no Origin at all is a non-browser caller (curl, a script);
  * those authenticate with the admin token instead and never reach here with a
  * cookie, so a missing Origin fails closed.
  */
+/**
+ * The host the browser asked for. Not `request.url`: the standalone server
+ * builds that from the address it is bound to (`0.0.0.0:3000`), so behind the
+ * proxy it never matches a real Origin. The proxy passes the Host header
+ * through, and middleware.ts reads the same header.
+ */
+function requestHost(request: Request): string {
+  return request.headers.get("host") ?? new URL(request.url).host;
+}
+
 export function sameOrigin(request: Request): boolean {
   const origin = request.headers.get("origin");
   if (!origin) return false;
   try {
-    return new URL(origin).host === new URL(request.url).host;
+    return new URL(origin).host === requestHost(request);
   } catch {
     return false;
   }
@@ -117,7 +172,7 @@ export function sameOriginPage(request: Request): boolean {
   const referer = request.headers.get("referer");
   if (!referer) return false;
   try {
-    return new URL(referer).host === new URL(request.url).host;
+    return new URL(referer).host === requestHost(request);
   } catch {
     return false;
   }
@@ -161,10 +216,15 @@ export async function requireAdmin(request: Request): Promise<Response | null> {
   return null;
 }
 
-/** The mirrored row for an account, for rendering a name next to their content. */
-export function getUserById(id: number): UserRow | undefined {
-  return getOne<UserRow>(
-    qb.selectFrom("users").selectAll().where("id", "=", id)
+/** An account, for rendering a name next to their content. Never the password hash. */
+export function getUserById(
+  id: number
+): Omit<UserRow, "password_hash"> | undefined {
+  return getOne<Omit<UserRow, "password_hash">>(
+    qb
+      .selectFrom("users")
+      .select(["id", "email", "role", "username", "display_name", "avatar_url", "synced_at"])
+      .where("id", "=", id)
   );
 }
 

@@ -16,7 +16,7 @@ import {
   Upload,
   Download,
   Settings,
-  ArrowLeft,
+  LogOut,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -43,13 +43,10 @@ interface MenuLink {
 export default function BottomNav({
   isAdmin = false,
   handle,
-  eliteUrl,
   children,
 }: {
   isAdmin?: boolean;
   handle: string;
-  /** Where the login comes from — the door back to it. Absent when unset. */
-  eliteUrl?: string | null;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
@@ -58,6 +55,12 @@ export default function BottomNav({
   // Close the sheet when a menu link navigates away.
   useEffect(() => setMenuOpen(false), [pathname]);
   useBackDismiss(menuOpen, () => setMenuOpen(false));
+
+  async function signOut() {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => null);
+    // A full load: the layout decides signed in or out on the server.
+    window.location.assign("/");
+  }
 
   // Longest prefix wins, so /profiles does not light up on /profile/12.
   const activeHref =
@@ -156,21 +159,14 @@ export default function BottomNav({
                   {label}
                 </Link>
               ))}
-              {eliteUrl && (
-                <>
-                  <div className="my-1 border-t border-white/10" />
-                  {/* A plain <a>: this address is not one of this app's routes,
-                      and asking the router to resolve it would 404 here before
-                      the browser ever left. */}
-                  <a
-                    href={eliteUrl}
-                    className="flex items-center gap-3 px-5 py-3 text-sm transition hover:bg-white/5"
-                  >
-                    <ArrowLeft size={18} className="text-white/60" />
-                    Back to Elite
-                  </a>
-                </>
-              )}
+              <div className="my-1 border-t border-white/10" />
+              <button
+                onClick={signOut}
+                className="flex w-full items-center gap-3 px-5 py-3 text-left text-sm transition hover:bg-white/5"
+              >
+                <LogOut size={18} className="text-white/60" />
+                Sign out
+              </button>
             </div>
           </div>
         </div>
