@@ -81,7 +81,7 @@ switch (command) {
     if (!email || !email.includes("@")) fail("Usage: add <email> [admin]");
     if (role !== "user" && role !== "admin") fail("Role is user or admin");
     if (find(email)) fail(`${email} already exists`);
-    const hash = password();
+    const hash = hashPassword(password());
     const info = db
       .prepare(
         "INSERT INTO users (email, role, username, password_hash) VALUES (?, ?, ?, ?)"
@@ -94,7 +94,7 @@ switch (command) {
     const [email] = args;
     const user = email && find(email);
     if (!user) fail(`No account ${email ?? ""}`);
-    const hash = password();
+    const hash = hashPassword(password());
     db.transaction(() => {
       db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hash, user.id);
       // A new password ends every session the old one opened.
