@@ -19,7 +19,7 @@ the address of the app it borrows its login from all come from the environment.
 | Stack | Next 15 (App Router), React 19, Tailwind, better-sqlite3 + Kysely |
 | Database | one SQLite file, `DATA_DIR/tikshortis.db` |
 | Media | on disk, under `SHORTS_ROOT` and `PROFILE_ROOT` — never in the database |
-| Accounts | none of its own; sign-in is elite-v2's (see [Sign-in](#sign-in)) |
+| Accounts | its own, made by hand (see [Sign-in](#sign-in)) |
 | Dev | `npm run dev` → :3040 |
 
 ### Pages
@@ -42,32 +42,36 @@ the address of the app it borrows its login from all come from the environment.
 
 ## Sign-in
 
-There are no accounts here. elite-v2 scopes its session cookie to the parent
-domain, so a browser signed in there arrives here already signed in; the token
-behind that cookie is posted to elite-v2's `POST /api/auth/verify`
-(`ELITE_VERIFY_URL`, over the internal network) and comes back as
-`{id, email, role, username, displayName, avatarUrl}` plus the account's chosen
-accent and background, which this app then wears.
+The app keeps its own accounts, in `users` and `sessions` in its own database.
+Until elite-v2 was shut down it borrowed that app's login; the `users` rows were
+already keyed by **elite-v2's own ids** — the same integers the migrated rows
+carry — so they became the real accounts in place, and the password hashes came
+across unchanged (scrypt, `salt:key`, `lib/password.ts`).
 
-Verifying the signature locally would need elite-v2's `JWT_SECRET` and would
-still accept a session that had been revoked — that row is in elite-v2's
-database. So the token goes back to be resolved, and the secret never leaves the
-app that owns it. Answers are cached 30 s (`lib/sso.ts`), so revocation lags by
-at most that.
+A session is a random token in an HttpOnly, host-only cookie
+(`tikshortis_session`, 30 days); only its SHA-256 is stored. A signed-out
+visitor gets the sign-in form on whatever page they opened, and lands back on it
+signed in. `POST /api/auth/login` counts failures per address and per email
+(10 per 15 minutes, in memory) and answers an unknown email in the same time as
+a wrong password.
 
-Accounts that have signed in are mirrored into a local `users` table, keyed by
-**elite-v2's own id** — the same integer the migrated rows already carry. It
-holds a name and an avatar URL so a comment can be rendered without a round
-trip. Nothing in it is a credential.
+**There is no sign-up page.** Accounts are made with `scripts/users.cjs`, which
+runs inside the container and travels on stdin:
 
-**`ELITE_VERIFY_URL` unset means nobody can sign in**, which is the honest
-failure: this app cannot authenticate anyone by itself.
+```bash
+docker exec -i tikshortis node - list                             < scripts/users.cjs
+docker exec -i -e PASSWORD=… tikshortis node - add <email> [admin] < scripts/users.cjs
+docker exec -i -e PASSWORD=… tikshortis node - passwd <email>      < scripts/users.cjs
+```
+
+`remove` takes the password away and ends the sessions but keeps the row: likes,
+uploads and playlists are keyed on its id.
 
 ### Writes
 
-The session cookie is scoped to the parent domain, and `SameSite=lax` does not
-separate this host from any other on it — every page on that domain is the same
-site. So `middleware.ts` refuses any non-GET request whose `Origin` is
+The session cookie is host-only, but `SameSite=lax` still sends it with a
+request from any page on the parent domain — every page on that domain is the
+same site. So `middleware.ts` refuses any non-GET request whose `Origin` is
 not this host. Two ways past it, both deliberate: a matching Origin, or
 `x-admin-token` (the host timers, which are not browsers and hold a credential
 no page can read). **`ADMIN_TOKEN` unset means closed, never open.**
@@ -196,10 +200,7 @@ group came back on the next nightly run. Here the pairs live in
 
 | | |
 |---|---|
-| `ELITE_VERIFY_URL` | where a session token is resolved. Unset = nobody can sign in |
-| `ELITE_INTERNAL_URL` | same app over the internal network, for the avatar proxy |
-| `ELITE_APP_URL` | public address of that app: the door back, and the only host an avatar URL may come from |
-| `APP_URL` | this app's own address, for the round trip through its sign-in page |
+| `APP_URL` | this app's own address, for links that leave it and come back |
 | `ADMIN_TOKEN` | the timers' credential. Unset = the write routes refuse them |
 | `SHORTS_ROOT`, `PROFILE_ROOT`, `IMPORT_ROOT` | media roots |
 | `HANDOVER_18PLUS_DIR` | elite-v2's import folder. Unset = the handover row reports it is unreachable |
