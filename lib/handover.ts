@@ -7,23 +7,24 @@ import { videoPathFor, posterPathFor } from "./shorts-storage";
 import { parseImportName, parseHashtags } from "./import-naming";
 
 /**
- * Hand a clip over to elite-v2's 18+ library.
+ * Hand a clip over to the 18+ library (adshortis, running on the Pi).
  *
  * In elite-v2 this was a channel move: both libraries were rows in one table, so
  * the clip changed a column and its files moved to the other tree. The 18+ half
- * stayed behind in that app, so a move across is now a move across an
- * application boundary — and writing into another app's database from here would
- * make two apps owners of one schema.
+ * now lives in its own app, so a move across is a move across an application
+ * boundary — and writing into another app's database from here would make two
+ * apps owners of one schema.
  *
- * So the clip goes in the way every other clip goes in: dropped into elite-v2's
- * shorts import folder, named with the bracket grammar its importer parses, and
- * left for the timer that already watches that folder. The row here is
- * soft-deleted once the file is on the other side. The clip is invisible in both
- * apps for a few minutes — elite-v2's importer runs every 5 minutes and its
- * transcoder every 3 — which is the same lag any drop into that folder has.
+ * So the clip goes in the way every other clip goes in: dropped into adshortis'
+ * import folder, named with the bracket grammar its importer parses, and left
+ * for the job that already sweeps that folder. The row here is soft-deleted once
+ * the file is on the other side. The clip is invisible in both apps for a few
+ * minutes — adshortis waits until a dropped file is two minutes old before it
+ * takes it — which is the same lag any drop into that folder has.
  *
- * HANDOVER_18PLUS_DIR is the mounted drop folder. Unset means the feature is
- * simply not available (the menu row asks first), never a silent no-op.
+ * HANDOVER_18PLUS_DIR is the mounted drop folder (the Pi's, over NFS). Unset
+ * means the feature is simply not available (the menu row asks first), never a
+ * silent no-op.
  */
 
 export function handoverConfigured(): boolean {
@@ -32,14 +33,24 @@ export function handoverConfigured(): boolean {
 
 // rename(2) fails with EXDEV between bind mounts — the drop folder is a
 // different mount from both storage roots — so a cross-device move is a copy
-// followed by an unlink. The unlink comes AFTER the copy is complete, so an
-// interrupted handover leaves a duplicate rather than nothing.
+// followed by an unlink. The copy goes to a ".part" name first and is renamed
+// into place inside the destination folder, so the importer on the other side
+// (which skips ".part" files) never picks up a half-written clip. The unlink
+// comes AFTER the copy is complete, so an interrupted handover leaves a
+// duplicate rather than nothing.
 function moveFile(src: string, dest: string) {
   try {
     fs.renameSync(src, dest);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
-    fs.copyFileSync(src, dest);
+    const partial = `${dest}.part`;
+    try {
+      fs.copyFileSync(src, partial);
+      fs.renameSync(partial, dest);
+    } catch (copyErr) {
+      fs.rmSync(partial, { force: true });
+      throw copyErr;
+    }
     fs.unlinkSync(src);
   }
 }
@@ -55,13 +66,15 @@ function uniqueDest(dir: string, base: string): string {
 }
 
 /**
- * The name elite-v2's importer will read the clip's metadata back out of.
+ * The name adshortis' importer will read the clip's metadata back out of.
  *
- * The creator is written as `[f_<name>]` so the clip is filed under the same
- * handle on the other side, and the caption's hashtags survive as `[h_]`
- * tokens. `[id_]` is deliberately NOT this app's row id: over there it means a
- * row in ITS database, and handing it a foreign id would collide with whatever
- * clip already holds it. The clip arrives as new.
+ * Its grammar (server/filename.ts over there) is
+ *   Title [#tag1 #tag2] [@Creator] [id=source-item-id].mp4
+ * The creator goes in `[@...]` so the clip is filed under the same handle on the
+ * other side, and the caption's hashtags travel in one `[#...]` group. `[id=]`
+ * is deliberately left out: over there it means the item id at the SOURCE site,
+ * used to skip clips a profile already has, and this app's row id is not that.
+ * The clip arrives as new.
  */
 function handoverName(
   caption: string | null,
@@ -73,15 +86,24 @@ function handoverName(
     : path.extname(originalKey) || ".mp4";
   const base = path.parse(originalKey).name.replace(/\.web$/i, "");
   const parsed = parseImportName(base);
-  const title = (caption || parsed.title || base).split("\n")[0].slice(0, 80);
   const hashtags = Array.from(
     new Set([...parsed.hashtags, ...parseHashtags(caption)])
   );
   const clean = (s: string) =>
-    s.replace(/[/:*?"<>|[\]\x00]+/g, " ").replace(/\s+/g, " ").trim();
-  const tags = hashtags.map((t) => `[h_${t}]`).join("");
-  const coll = creator ? `[f_${clean(creator)}]` : "";
-  return `${clean(title) || "clip"} ${tags}${coll}`.trim() + ext;
+    s.replace(/[/\\:*?"<>|[\]\x00-\x1f]+/g, " ").replace(/\s+/g, " ").trim();
+  // The hashtags already travel in their own group; left in the title they
+  // would show up twice on the other side.
+  // A caption that is nothing but hashtags falls back to the file's own title.
+  const titleOf = (s: string | null) =>
+    clean((s || "").split("\n")[0].replace(/#[a-z0-9_]{1,50}/gi, " "))
+      .slice(0, 80)
+      .trim();
+  const title = titleOf(caption) || titleOf(parsed.title) || titleOf(base);
+  const parts = [title || "clip"];
+  if (hashtags.length) parts.push(`[${hashtags.map((t) => `#${t}`).join(" ")}]`);
+  const who = creator ? clean(creator) : "";
+  if (who) parts.push(`[@${who}]`);
+  return parts.join(" ") + ext;
 }
 
 export function handOverTo18Plus(
