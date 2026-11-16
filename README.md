@@ -206,3 +206,4 @@ group came back on the next nightly run. Here the pairs live in
 | `HANDOVER_18PLUS_DIR` | elite-v2's import folder. Unset = the handover row reports it is unreachable |
 | `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` | vision summaries. Neither = the Analysis page says so |
 | `YT_DLP_BIN` | bind-mounted from the host, so it updates without an image rebuild |
+| `EMBED_FRAME_ANCESTORS` | origins that may show the app in a frame (Grabbit's hub), space separated, e.g. `https://grabbit.example.com`. Unset or malformed = `frame-ancestors 'none'`, as before. Read per request: changing it needs a restart, not a rebuild. Tests: `npx tsx --test test/*.test.ts` |

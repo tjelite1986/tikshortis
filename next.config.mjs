@@ -16,7 +16,8 @@ const CSP = [
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
-  "frame-ancestors 'none'",
+  // frame-ancestors is sent by middleware.ts, per request: 'none' unless
+  // EMBED_FRAME_ANCESTORS names the hub that may embed the app.
 ].join("; ");
 
 /** @type {import('next').NextConfig} */

@@ -5,6 +5,8 @@ import BottomNav from "@/components/bottom-nav";
 import SignedOut from "@/components/signed-out";
 import PwaRegister from "@/components/pwa-register";
 import InstallBanner from "@/components/install-banner";
+import EmbedBridge from "@/components/embed-bridge";
+import { embedOrigins } from "@/lib/embed";
 
 export const metadata: Metadata = {
   title: "Tikshortis",
@@ -65,6 +67,7 @@ export default async function RootLayout({
           )}
         </div>
         <PwaRegister />
+        <EmbedBridge origins={embedOrigins(process.env.EMBED_FRAME_ANCESTORS)} />
       </body>
     </html>
   );
