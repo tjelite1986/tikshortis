@@ -32,3 +32,15 @@ test("one malformed entry turns the whole list off", () => {
     assert.equal(frameAncestors(bad), "frame-ancestors 'none'", bad);
   }
 });
+
+test("the full policy always travels with frame-ancestors", async () => {
+  const { contentSecurityPolicy, BASE_DIRECTIVES } = await import("../lib/csp.mjs");
+  for (const env of [undefined, "http://127.0.0.1:3399", "*"]) {
+    const csp = contentSecurityPolicy(frameAncestors(env));
+    for (const d of BASE_DIRECTIVES) assert.ok(csp.includes(d), `${d} missing for ${env}`);
+    assert.equal(csp.match(/frame-ancestors/g)?.length, 1);
+  }
+  assert.ok(
+    contentSecurityPolicy(frameAncestors(undefined)).endsWith("frame-ancestors 'none'"),
+  );
+});

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { frameAncestors } from "@/lib/embed";
+import { contentSecurityPolicy } from "@/lib/csp.mjs";
 
 /**
  * Cross-site request forgery.
@@ -27,14 +28,16 @@ export function middleware(request: NextRequest) {
 /**
  * Who may frame this app is decided per request, from the environment, so
  * Grabbit's hub can embed it without a rebuild (see lib/embed.ts). Unset is
- * `frame-ancestors 'none'`, the value next.config.mjs used to send. It is its
- * own Content-Security-Policy header: browsers enforce every CSP header, so the
- * main policy in next.config.mjs still applies in full.
+ * `frame-ancestors 'none'`, the value next.config.mjs sends.
+ *
+ * The whole policy is set here, not just frame-ancestors: a CSP header from
+ * middleware replaces the one next.config.mjs sends, so appending only the
+ * frame-ancestors directive silently dropped the rest (see lib/csp.mjs).
  */
 function withFrameAncestors(res: NextResponse): NextResponse {
-  res.headers.append(
+  res.headers.set(
     "Content-Security-Policy",
-    frameAncestors(process.env.EMBED_FRAME_ANCESTORS),
+    contentSecurityPolicy(frameAncestors(process.env.EMBED_FRAME_ANCESTORS)),
   );
   return res;
 }

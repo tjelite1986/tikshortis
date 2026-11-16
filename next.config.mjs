@@ -1,24 +1,9 @@
-// Tikshortis is self-hosted end to end: video, posters and avatars are all
-// served by this app's own routes. The only cross-origin call the browser makes
-// is to the sign-in host (elite-v2), and that is a redirect, not a fetch.
-// 'unsafe-inline' script/style is required by Next's hydration payload and by
-// Tailwind's injected styles.
-const CSP = [
-  "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "media-src 'self' blob:",
-  "font-src 'self' data:",
-  "connect-src 'self'",
-  "worker-src 'self' blob:",
-  "frame-src 'self' blob:",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-  // frame-ancestors is sent by middleware.ts, per request: 'none' unless
-  // EMBED_FRAME_ANCESTORS names the hub that may embed the app.
-].join("; ");
+import { contentSecurityPolicy } from "./lib/csp.mjs";
+
+// The full policy with frame-ancestors 'none'. middleware.ts replaces it with
+// the same policy plus the configured frame-ancestors on every path it
+// matches; this covers the paths it skips (static assets, the upload route).
+const CSP = contentSecurityPolicy("frame-ancestors 'none'");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
