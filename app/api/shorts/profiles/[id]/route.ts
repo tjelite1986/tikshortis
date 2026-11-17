@@ -3,6 +3,8 @@ import { getSession } from "@/lib/auth";
 import { db, ShortProfileRow } from "@/lib/db";
 import { qb, getOne } from "@/lib/kysely";
 import { assertDownloadableUrl } from "@/lib/shorts-download";
+import { CHANNEL, getProfileLinks, getProfileSummary } from "@/lib/shorts";
+import { handleOf } from "@/lib/handle";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +13,25 @@ async function requireAdmin() {
   if (!session) return { error: "Unauthorized", status: 401 as const };
   if (session.role !== "admin") return { error: "Forbidden", status: 403 as const };
   return { session };
+}
+
+// The profile page header (name, avatar, counts, links) for clients outside
+// this app. Any signed-in user, like the page; a profile on another channel
+// belongs to another library and is not found here.
+export async function GET(_req: Request, props: { params: Promise<{ id: string }> }) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const id = Number((await props.params).id);
+  const profile = Number.isInteger(id) ? getProfileSummary(id) : undefined;
+  if (!profile || profile.channel !== CHANNEL) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  return NextResponse.json({
+    profile: { ...profile, handle: handleOf(profile.name) },
+    links: getProfileLinks(profile),
+  });
 }
 
 export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {

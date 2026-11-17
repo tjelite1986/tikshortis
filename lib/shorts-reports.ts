@@ -1,4 +1,4 @@
-import { db } from "./db";
+import { db, type ShortChannel } from "./db";
 import type { ReportReason } from "./report-reasons";
 
 // Reports: a viewer flagging a clip for an admin. The data side of the
@@ -44,6 +44,9 @@ export interface OpenReport {
 
 export interface ReportedShort {
   id: number;
+  // Lets a consumer outside this app (Grabbit's gateway) drop clips that are
+  // not in the general channel without a second lookup.
+  channel: ShortChannel;
   caption: string | null;
   profile_name: string | null;
   uploader_name: string | null;
@@ -69,7 +72,7 @@ export function listReportedShorts(): ReportedShort[] {
     .prepare(
       `SELECT rp.short_id, rp.reason, rp.note, rp.created_at,
               COALESCE(u.display_name, u.username, substr(u.email, 1, instr(u.email, '@') - 1)) AS reporter,
-              s.caption, s.poster_key, p.name AS profile_name,
+              s.channel, s.caption, s.poster_key, p.name AS profile_name,
               COALESCE(up.display_name, up.username, substr(up.email, 1, instr(up.email, '@') - 1)) AS uploader_name
        FROM short_reports rp
        JOIN shorts s ON s.id = rp.short_id
@@ -85,6 +88,7 @@ export function listReportedShorts(): ReportedShort[] {
     note: string | null;
     created_at: string;
     reporter: string | null;
+    channel: ShortChannel;
     caption: string | null;
     poster_key: string | null;
     profile_name: string | null;
@@ -96,6 +100,7 @@ export function listReportedShorts(): ReportedShort[] {
     if (!entry) {
       entry = {
         id: r.short_id,
+        channel: r.channel,
         caption: r.caption,
         profile_name: r.profile_name,
         uploader_name: r.uploader_name,
