@@ -1,10 +1,42 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { getShort } from "@/lib/shorts";
+import { canAccessChannel, canViewShort, getShort } from "@/lib/shorts";
 import { deleteShortFiles } from "@/lib/shorts-storage";
 
 export const dynamic = "force-dynamic";
+
+// One clip's identity, for a client outside this app (Grabbit's gateway checks
+// a clip's audience before it serves the clip's media by id). Same rules as
+// the media routes: private clips are owner/admin only and answer 404, and a
+// clip outside this app's channel is refused. Identity fields only.
+export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const short = getShort(Number(params.id));
+  if (!short || !canViewShort(short, Number(session.sub), session.role === "admin")) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  if (!(await canAccessChannel(short.channel))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  return NextResponse.json(
+    {
+      short: {
+        id: short.id,
+        channel: short.channel,
+        source: short.source,
+        source_id: short.source_id,
+        is_private: short.is_private,
+        status: short.status,
+      },
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
+}
 
 // Rename a clip's title/caption (the uploader of their own clip, or an admin —
 // same guard as delete, so the in-player "Edit title" works for own uploads).
