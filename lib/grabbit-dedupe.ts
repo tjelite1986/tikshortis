@@ -89,14 +89,20 @@ function ensureJournal(db: Database.Database) {
     error TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     done_at TEXT,
-    uid TEXT
+    uid TEXT,
+    held_dev TEXT,
+    held_ino TEXT,
+    purged_bytes INTEGER
   )`);
-  // Guarded ALTER for journals created before uid existed (same pattern as
-  // lib/db.ts). Older rows keep uid NULL and can never be acted on by uid.
+  // Guarded ALTERs for journals created before these columns existed (same
+  // pattern as lib/db.ts). Older rows keep uid NULL and can never be acted on
+  // by uid; rows without held_dev/held_ino fall back to the checks made before
+  // the held file's identity was recorded.
   const cols = (db.prepare("PRAGMA table_info(grabbit_dedupe_journal)").all() as { name: string }[]).map((c) => c.name);
-  if (!cols.includes("uid")) {
+  for (const [name, type] of [["uid", "TEXT"], ["held_dev", "TEXT"], ["held_ino", "TEXT"], ["purged_bytes", "INTEGER"]]) {
+    if (cols.includes(name)) continue;
     try {
-      db.exec("ALTER TABLE grabbit_dedupe_journal ADD COLUMN uid TEXT");
+      db.exec(`ALTER TABLE grabbit_dedupe_journal ADD COLUMN ${name} ${type}`);
     } catch (e) {
       if (!String(e).includes("duplicate column name")) throw e;
     }
@@ -114,6 +120,36 @@ function syncDir(dir: string) {
     fs.closeSync(fd);
   }
 }
+
+// fsync every directory from `dir` up to and including `top`: a name created
+// in `dir`, and any folder created on the way down, are then on disk.
+function syncUp(dir: string, top: string) {
+  let cur = dir;
+  for (;;) {
+    syncDir(cur);
+    if (cur === top) return;
+    const up = path.dirname(cur);
+    if (up === cur || path.relative(top, up).startsWith("..")) return;
+    cur = up;
+  }
+}
+
+// The held name's identity as recorded in the journal (decimal strings, from
+// bigint stats so no inode number loses precision).
+function identity(abs: string): { dev: string; ino: string } {
+  const st = fs.lstatSync(abs, { bigint: true });
+  return { dev: String(st.dev), ino: String(st.ino) };
+}
+
+// A row with a recorded identity accepts only that inode at its held name.
+// Rows written before identities were recorded keep the older checks.
+function heldMatches(row: { held_dev: string | null; held_ino: string | null }, abs: string): boolean {
+  if (row.held_dev == null || row.held_ino == null) return true;
+  const now = identity(abs);
+  return now.dev === row.held_dev && now.ino === row.held_ino;
+}
+
+const HELD_REPLACED = "The held original was replaced since the merge (another file now has its name); nothing changed";
 
 // Remove a name only if it is still the inode this operation put there.
 function unlinkIfSame(abs: string, want: fs.Stats) {
@@ -301,15 +337,32 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
     const tmp = path.join(path.dirname(drop.abs), `.${path.basename(drop.abs).slice(0, 150)}.dedupe-${id}-${crypto.randomBytes(4).toString("hex")}`);
     let heldCreated = false;
     let stageCreated = false;
+    let renamed = false;
     try {
-      fs.mkdirSync(trashDir, { recursive: true });
+      const madeTrash = fs.mkdirSync(trashDir, { recursive: true }) !== undefined;
       fs.linkSync(drop.abs, trashAbs); // the original stays reachable from the trash
       heldCreated = true;
+      // The held name (and the trash folder, if it is new) must be on disk
+      // before the clip's name is changed.
+      syncDir(trashDir);
+      if (madeTrash) syncDir(drop.dir);
+      // Restore and purge later accept only this inode at the held name.
+      const held = identity(trashAbs);
+      ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET held_dev = ?, held_ino = ? WHERE id = ?`).run(held.dev, held.ino, id);
       fs.linkSync(keep.abs, tmp);
       stageCreated = true;
       fs.renameSync(tmp, drop.abs); // atomic: the clip's name now holds the kept bytes
       stageCreated = false;
+      renamed = true;
+      // The new clip name must be on disk before the journal says linked.
+      syncDir(path.dirname(drop.abs));
     } catch (e) {
+      if (renamed) {
+        // The files did change but are not confirmed on disk. The row stays
+        // pending, which restore and purge accept, so nothing is stranded.
+        ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET error = ? WHERE id = ?`).run(String((e as Error).message).slice(0, 300), id);
+        throw new Error(`TikShortis merged the files but could not confirm it on disk (${(e as NodeJS.ErrnoException).code || (e as Error).message}); merge ${id} is pending and can be restored`);
+      }
       // Only names this merge made are removed, and only while they still are
       // the inode it linked: an entry that was already there (EEXIST) is
       // someone else's and stays.
@@ -335,12 +388,20 @@ interface JournalRow {
   drop_key: string;
   trash_name: string | null;
   sha256: string;
+  role: "video" | "poster";
   bytes: number;
   state: string;
   uid: string | null;
+  held_dev: string | null;
+  held_ino: string | null;
+  purged_bytes: number | null;
 }
 
-function journal(ctx: Ctx, id: unknown, uid: unknown): JournalRow {
+// The row for {id, uid}. A retry of the action that already completed it
+// (restore of a restored row, purge of a purged row, for example after a lost
+// response) returns the row with replay set, so the caller answers the same
+// success again. The opposite action stays refused.
+function journal(ctx: Ctx, id: unknown, uid: unknown, op: "restore" | "purge"): JournalRow & { replay: boolean } {
   ensureJournal(ctx.db);
   // Only a positive integer (or its decimal string); Number(true) and
   // Number([1]) are 1, which would name another merge.
@@ -357,17 +418,21 @@ function journal(ctx: Ctx, id: unknown, uid: unknown): JournalRow {
   if (!row.uid || row.uid.length !== uid.length || !crypto.timingSafeEqual(Buffer.from(row.uid), Buffer.from(uid))) {
     throw new DedupeError("This merge id belongs to a different merge than the one Grabbit recorded (uid mismatch); nothing changed", 409, "Check the merge by hand in TikShortis before acting on it.");
   }
+  if ((op === "restore" && row.state === "restored") || (op === "purge" && row.state === "purged")) {
+    return { ...row, replay: true };
+  }
   // A 'pending' row is a merge that was interrupted part way. Its trash name
   // is recorded before any file changed, and restore and purge are safe in
   // every state it can be in (held link only, or held original plus link).
   if (!["linked", "pending"].includes(row.state) || !row.trash_name || row.trash_name !== path.basename(row.trash_name)) {
     throw new DedupeError(`This merge is ${row.state}; nothing to do`);
   }
-  return row;
+  return { ...row, replay: false };
 }
 
 export function restore(ctx: Ctx, id: unknown, uid: unknown) {
-  const row = journal(ctx, id, uid);
+  const row = journal(ctx, id, uid, "restore");
+  if (row.replay) return { id: row.id, restored: `${row.channel}/${row.drop_key}` };
   const dir = path.join(ctx.shortsRoot, row.channel);
   const trashAbs = path.join(dir, TRASH_DIR, row.trash_name as string);
   const drop = parsePath(ctx, `${row.channel}/${row.drop_key}`);
@@ -379,6 +444,17 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
     throw new DedupeError("The held original is missing");
   }
   if (!held.isFile()) throw new DedupeError("The held original is not a file");
+  if (!heldMatches(row, trashAbs)) throw new DedupeError(HELD_REPLACED, 409, "Check the trash folder by hand in TikShortis.");
+  // The clip must still name this file. A clip moved to another profile (or
+  // renamed, or deleted) points elsewhere now; restoring would recreate a
+  // file no clip uses.
+  if (!refsOf(ctx.db, row.channel, row.drop_key).some((r) => r.role === row.role)) {
+    throw new DedupeError(
+      "No clip uses the merged file's name any more (the clip was moved, renamed or deleted); restoring would create a file no clip uses, so nothing changed",
+      409,
+      "Delete the held original instead, or restore it by hand."
+    );
+  }
   // Before any change, also when the clip's name is absent: no folder between
   // the channel root and the clip may have become a link since the merge.
   checkParents(dir, drop.abs, true);
@@ -413,30 +489,40 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
     // Again with every folder present: none may be missing or a link now.
     checkParents(dir, drop.abs, false);
     fs.linkSync(trashAbs, tmp);
+    // What is about to be put back must be the inode the merge held.
+    const staged = fs.lstatSync(tmp);
+    if (staged.dev !== held.dev || staged.ino !== held.ino || !heldMatches(row, tmp)) {
+      unlinkIfSame(tmp, staged);
+      throw new DedupeError(HELD_REPLACED, 409, "Check the trash folder by hand in TikShortis.");
+    }
     try {
       fs.renameSync(tmp, drop.abs);
     } catch (e) {
       unlinkIfSame(tmp, held);
       throw e;
     }
-    // The clip's name must be on disk before the journal says restored and
-    // the held name goes.
-    syncDir(path.dirname(drop.abs));
   }
+  // On every path, also a retry that finds the clip's name already on the
+  // held inode: the clip's name, and every folder on its way (some may have
+  // been created just now or by an earlier attempt), must be on disk before
+  // the journal says restored and the held name goes.
+  syncUp(path.dirname(drop.abs), dir);
   // State first: a held copy left behind by a crash after this point is a
   // harmless extra name, while the reverse order would strand the record.
   ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
-  try { fs.unlinkSync(trashAbs); } catch { /* an extra name of the restored file */ }
+  unlinkIfSame(trashAbs, held); // an extra name of the restored file if it stays
   return { id: row.id, restored: `${row.channel}/${row.drop_key}` };
 }
 
 export function purge(ctx: Ctx, id: unknown, uid: unknown) {
-  const row = journal(ctx, id, uid);
+  const row = journal(ctx, id, uid, "purge");
+  if (row.replay) return { id: row.id, bytes: row.purged_bytes ?? 0 };
   const trashAbs = path.join(ctx.shortsRoot, row.channel, TRASH_DIR, row.trash_name as string);
   let bytes = 0;
   try {
     const st = fs.lstatSync(trashAbs);
     if (!st.isFile()) throw new DedupeError("The held original is not a file");
+    if (!heldMatches(row, trashAbs)) throw new DedupeError(HELD_REPLACED, 409, "Check the trash folder by hand in TikShortis.");
     // Freed only if no live name shares it (the clip's own name was replaced
     // by the link, so normally nlink is 1 here).
     bytes = st.nlink === 1 ? st.size : 0;
@@ -445,7 +531,7 @@ export function purge(ctx: Ctx, id: unknown, uid: unknown) {
     if (e instanceof DedupeError) throw e;
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
-  ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'purged', done_at = datetime('now') WHERE id = ?`).run(row.id);
+  ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'purged', purged_bytes = ?, done_at = datetime('now') WHERE id = ?`).run(bytes, row.id);
   return { id: row.id, bytes };
 }
 
