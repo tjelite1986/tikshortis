@@ -47,9 +47,11 @@ export class DedupeError extends Error {
 let cachedToken: { at: number; value: string | null } | null = null;
 export function expectedToken(): string | null {
   if (cachedToken && Date.now() - cachedToken.at < 60_000) return cachedToken.value;
-  let value: string | null = process.env.GRABBIT_DEDUPE_TOKEN || null;
+  // The mounted file is the only source, the same one Grabbit reads; a missing
+  // or unreadable file switches the routes off.
+  let value: string | null = null;
   const file = process.env.GRABBIT_DEDUPE_TOKEN_FILE;
-  if (!value && file) {
+  if (file) {
     try {
       value = fs.readFileSync(file, "utf8").trim() || null;
     } catch {
@@ -227,18 +229,25 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
     );
     const trashDir = path.join(drop.dir, TRASH_DIR);
     const trashName = `${id}-${path.basename(drop.key).slice(0, 150)}`;
+    // The trash name is on record before any file changes, so an interrupted
+    // merge can still be restored or purged (see journal()).
+    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET trash_name = ? WHERE id = ?`).run(trashName, id);
     const trashAbs = path.join(trashDir, trashName);
     const tmp = path.join(path.dirname(drop.abs), `.${path.basename(drop.abs)}.dedupe-${id}`);
+    let heldCreated = false;
     try {
       fs.mkdirSync(trashDir, { recursive: true });
       fs.linkSync(drop.abs, trashAbs); // the original stays reachable from the trash
+      heldCreated = true;
       fs.linkSync(keep.abs, tmp);
       fs.renameSync(tmp, drop.abs); // atomic: the clip's name now holds the kept bytes
     } catch (e) {
       try { fs.unlinkSync(tmp); } catch { /* not created */ }
+      // Only a name this merge made is removed; an older file under the same
+      // trash name (EEXIST) is someone else's and stays.
       try {
         const now = fs.lstatSync(drop.abs);
-        if (now.ino === ds.ino) fs.unlinkSync(trashAbs);
+        if (heldCreated && now.ino === ds.ino) fs.unlinkSync(trashAbs);
       } catch { /* left for a manual look; journal says failed */ }
       ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'failed', error = ?, done_at = datetime('now') WHERE id = ?`).run(String((e as Error).message).slice(0, 300), id);
       throw new DedupeError(`TikShortis could not merge the files (${(e as NodeJS.ErrnoException).code || (e as Error).message}); nothing changed`);
@@ -263,11 +272,16 @@ interface JournalRow {
 
 function journal(ctx: Ctx, id: unknown): JournalRow {
   ensureJournal(ctx.db);
-  const n = Number(id);
-  if (!Number.isInteger(n) || n < 1) throw new DedupeError("Not a merge id", 400);
+  // Only a positive integer (or its decimal string); Number(true) and
+  // Number([1]) are 1, which would name another merge.
+  const n = typeof id === "number" ? id : typeof id === "string" && /^[1-9][0-9]{0,15}$/.test(id) ? Number(id) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) throw new DedupeError("Not a merge id", 400);
   const row = ctx.db.prepare(`SELECT * FROM grabbit_dedupe_journal WHERE id = ?`).get(n) as JournalRow | undefined;
   if (!row) throw new DedupeError("No such merge", 404);
-  if (row.state !== "linked" || !row.trash_name || row.trash_name !== path.basename(row.trash_name)) {
+  // A 'pending' row is a merge that was interrupted part way. Its trash name
+  // is recorded before any file changed, and restore and purge are safe in
+  // every state it can be in (held link only, or held original plus link).
+  if (!["linked", "pending"].includes(row.state) || !row.trash_name || row.trash_name !== path.basename(row.trash_name)) {
     throw new DedupeError(`This merge is ${row.state}; nothing to do`);
   }
   return row;
@@ -309,8 +323,10 @@ export function restore(ctx: Ctx, id: unknown) {
   fs.mkdirSync(path.dirname(drop.abs), { recursive: true });
   fs.linkSync(trashAbs, tmp);
   fs.renameSync(tmp, drop.abs);
-  fs.unlinkSync(trashAbs);
+  // State first: a held copy left behind by a crash after this point is a
+  // harmless extra name, while the reverse order would strand the record.
   ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
+  try { fs.unlinkSync(trashAbs); } catch { /* an extra name of the restored file */ }
   return { id: row.id, restored: `${row.channel}/${row.drop_key}` };
 }
 

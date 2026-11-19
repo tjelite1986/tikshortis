@@ -51,8 +51,15 @@ function guard(request: NextRequest): NextResponse {
   // Presence, not validity: the routes verify the token themselves. This only
   // decides whether the request looks like a browser's.
   if (request.headers.get("x-admin-token")) return NextResponse.next();
-  // Same reasoning for Grabbit's dedupe calls (app/api/dedupe/v1).
-  if (request.headers.get("x-grabbit-dedupe-token")) return NextResponse.next();
+  // Grabbit's dedupe calls (app/api/dedupe/v1) skip the origin check only on
+  // their own routes, which verify the token themselves. The header opens no
+  // other route.
+  if (
+    request.nextUrl.pathname.startsWith("/api/dedupe/v1/") &&
+    request.headers.get("x-grabbit-dedupe-token")
+  ) {
+    return NextResponse.next();
+  }
 
   const host = request.headers.get("host");
   const origin = request.headers.get("origin");
