@@ -447,7 +447,73 @@ export function opStatus(ctx: Ctx, v: unknown) {
   if (!j) throw new DedupeError("The journal row for this merge is missing; check by hand", 409);
   let posts: number[] = [];
   try { posts = JSON.parse(j.drop_refs || "[]"); } catch { posts = []; }
-  return { op, found: true, inProgress: runningOps.has(op), id: j.id, uid: j.uid, bytes: j.bytes, state: j.state, posts };
+  const running = runningOps.has(op);
+  let state = j.state;
+  let stopped = false;
+  if (state === "pending" && !running && !busy) {
+    state = reconcileStopped(ctx, j.id);
+    stopped = state === "pending";
+  }
+  return { op, found: true, inProgress: running, id: j.id, uid: j.uid, bytes: j.bytes, state, stopped, posts };
+}
+
+// A 'pending' row whose merge is not running any more (the process stopped
+// part way). The files show how far it got:
+// - the clip still holds its original and no held name exists, or the held
+//   name is only a second name of that same original: nothing changed (the
+//   extra held name is removed) -> 'failed';
+// - the held name is the recorded original and the clip holds the recorded
+//   keeper inode: the merge finished but was not recorded -> 'linked';
+// - anything else cannot be told apart safely -> stays 'pending' for a check
+//   by hand. Only 'linked' lets Grabbit list it as a restorable merge.
+function reconcileStopped(ctx: Ctx, id: number): string {
+  const row = ctx.db.prepare(`SELECT * FROM grabbit_dedupe_journal WHERE id = ?`).get(id) as JournalRow | undefined;
+  if (!row || row.state !== "pending") return row ? row.state : "pending";
+  try {
+    const drop = parsePath(ctx, `${row.channel}/${row.drop_key}`);
+    const trashAbs = row.trash_name && row.trash_name === path.basename(row.trash_name)
+      ? path.join(ctx.shortsRoot, row.channel, TRASH_DIR, row.trash_name)
+      : null;
+    const look = (abs: string): fs.Stats | null | "error" => {
+      try {
+        return fs.lstatSync(abs);
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === "ENOENT" ? null : "error";
+      }
+    };
+    const d = look(drop.abs);
+    const h = trashAbs ? look(trashAbs) : null;
+    if (d === "error" || h === "error") return "pending";
+    const dId = d && d.isFile() ? identity(drop.abs) : null;
+    const isKeep = !!dId && row.keep_dev != null && row.keep_ino != null && dId.dev === row.keep_dev && dId.ino === row.keep_ino;
+    const fail = (why: string) => {
+      ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'failed', error = ?, done_at = datetime('now') WHERE id = ? AND state = 'pending'`).run(why, row.id);
+      return "failed";
+    };
+    if (!h) {
+      // No held name: the clip was never swapped (the keeper's inode on
+      // record is written before the swap, and the held name before that).
+      if (d && d.isFile() && !isKeep && row.held_ino == null) return fail("stopped before any file changed");
+      return "pending";
+    }
+    if (!h.isFile() || !heldMatches(row, trashAbs as string) || row.held_ino == null) return "pending";
+    if (isKeep) {
+      ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'linked', error = ?, done_at = datetime('now') WHERE id = ? AND state = 'pending'`).run("finished before a stop, recorded later", row.id);
+      return "linked";
+    }
+    if (d && d.isFile() && d.dev === h.dev && d.ino === h.ino) {
+      // The clip still holds its original: the held name is a second name of
+      // it and goes again. Checked once more right before.
+      const now = look(drop.abs);
+      if (now && now !== "error" && now.dev === h.dev && now.ino === h.ino && removeHeld(trashAbs as string, h) !== "other") {
+        syncDir(path.dirname(trashAbs as string));
+        return fail("stopped before the clip changed");
+      }
+    }
+    return "pending";
+  } catch {
+    return "pending";
+  }
 }
 
 async function linkFiles(ctx: Ctx, body: LinkBody, op: string | null) {
@@ -898,9 +964,47 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
   return { id: row.id, restored: `${row.channel}/${row.drop_key}` };
 }
 
-export function purge(ctx: Ctx, id: unknown, uid: unknown) {
+// A clip name (the keeper's or the merged clip's) that still holds the
+// merged bytes, hashed now. The stat is taken after the hash. null if none.
+async function survivorOf(ctx: Ctx, row: JournalRow): Promise<{ abs: string; st: fs.Stats } | null> {
+  for (const key of [row.keep_key, row.drop_key]) {
+    let p: ReturnType<typeof parsePath>;
+    try { p = parsePath(ctx, `${row.channel}/${key}`); } catch { continue; }
+    let st0: fs.Stats;
+    try { st0 = regular(p.abs, p.dir); } catch { continue; }
+    let h: string;
+    try { h = await sha256Of(p.abs); } catch { continue; }
+    let st: fs.Stats;
+    try { st = fs.lstatSync(p.abs); } catch { continue; }
+    if (h !== row.sha256 || !st.isFile() || st.dev !== st0.dev || st.ino !== st0.ino || st.size !== st0.size || st.mtimeMs !== st0.mtimeMs) continue;
+    return { abs: p.abs, st };
+  }
+  return null;
+}
+
+export async function purge(ctx: Ctx, id: unknown, uid: unknown) {
+  const first = journal(ctx, id, uid, "purge");
+  if (first.replay) return { id: first.id, bytes: first.purged_bytes ?? 0 };
+  // The held original goes for good only while a clip still has its bytes:
+  // the keeper (or the merged clip's name) is hashed first. A merge whose
+  // clips were both removed or changed keeps its held original.
+  // (A held name that is already gone has nothing left to lose.)
+  let heldThere = true;
+  try {
+    fs.lstatSync(path.join(ctx.shortsRoot, first.channel, TRASH_DIR, first.trash_name as string));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    heldThere = false;
+  }
+  const survivor = heldThere ? await survivorOf(ctx, first) : null;
+  if (heldThere && !survivor) {
+    throw new DedupeError("No clip has these bytes any more, so the held original is the last copy; nothing was deleted", 409, "Restore it in Grabbit if the clip is still needed.");
+  }
+  // The hash took time: a restore may have finished this row meanwhile.
   const row = journal(ctx, id, uid, "purge");
-  if (row.replay) return { id: row.id, bytes: row.purged_bytes ?? 0 };
+  if (row.replay || row.state !== first.state || row.held_action !== first.held_action) {
+    throw new DedupeError("This merge changed while the delete was checked; nothing was deleted, try again", 409);
+  }
   const trashAbs = path.join(ctx.shortsRoot, row.channel, TRASH_DIR, row.trash_name as string);
   let bytes = 0;
   let unlinked = false;
@@ -933,6 +1037,14 @@ export function purge(ctx: Ctx, id: unknown, uid: unknown) {
     const st = fs.lstatSync(trashAbs);
     if (!st.isFile() || st.dev !== st0.dev || st.ino !== st0.ino || !heldMatches(row, trashAbs)) {
       throw new DedupeError(HELD_REPLACED, 409, "Check the trash folder by hand in TikShortis.");
+    }
+    // The held name came back or appeared after the first look: no
+    // survivor was checked for it, so it stays.
+    if (!survivor) throw new DedupeError("The held original changed while the delete was checked; nothing was deleted, try again", 409);
+    let sv: fs.Stats | null = null;
+    try { sv = fs.lstatSync(survivor.abs); } catch { sv = null; }
+    if (!sv || !sv.isFile() || sv.dev !== survivor.st.dev || sv.ino !== survivor.st.ino || sv.size !== survivor.st.size || sv.mtimeMs !== survivor.st.mtimeMs) {
+      throw new DedupeError("The clip that keeps these bytes changed meanwhile; nothing was deleted, try again", 409);
     }
     // Freed only if no live name shares it (the clip's own name was replaced
     // by the link, so normally nlink is 1 here).

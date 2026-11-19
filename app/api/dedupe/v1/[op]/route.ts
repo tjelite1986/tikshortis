@@ -69,7 +69,7 @@ export async function POST(request: Request, { params }: Params) {
       case "restore":
         return NextResponse.json(restore(ctx(), body.id, body.uid));
       case "purge":
-        return NextResponse.json(purge(ctx(), body.id, body.uid));
+        return NextResponse.json(await purge(ctx(), body.id, body.uid));
       default:
         return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
