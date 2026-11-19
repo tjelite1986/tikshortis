@@ -37,11 +37,21 @@ type Channel = (typeof CHANNELS)[number];
 export class DedupeError extends Error {
   status: number;
   fix: string | null;
-  constructor(message: string, status = 409, fix: string | null = null) {
+  /** Extra answer fields, e.g. { mayHaveChanged: true, id, uid }. */
+  extra: Record<string, unknown> | null;
+  constructor(message: string, status = 409, fix: string | null = null, extra: Record<string, unknown> | null = null) {
     super(message);
     this.status = status;
     this.fix = fix;
+    this.extra = extra;
   }
+}
+
+// A mutation that failed after a file may already have changed. Grabbit keeps
+// such an operation pending (with the id and uid) instead of closing it as
+// "nothing changed".
+function mayHaveChanged(message: string, id: number, uid: string | null): DedupeError {
+  return new DedupeError(message, 422, "Check the clip in TikShortis; restore or purge this merge with its id and uid.", { mayHaveChanged: true, id, uid });
 }
 
 export function expectedToken(): string | null {
@@ -92,14 +102,17 @@ function ensureJournal(db: Database.Database) {
     uid TEXT,
     held_dev TEXT,
     held_ino TEXT,
-    purged_bytes INTEGER
+    purged_bytes INTEGER,
+    drop_refs TEXT
   )`);
   // Guarded ALTERs for journals created before these columns existed (same
   // pattern as lib/db.ts). Older rows keep uid NULL and can never be acted on
   // by uid; rows without held_dev/held_ino fall back to the checks made before
-  // the held file's identity was recorded.
+  // the held file's identity was recorded. Rows without drop_refs (the posts
+  // that used the dropped file) cannot prove who owns the name and are
+  // refused by restore.
   const cols = (db.prepare("PRAGMA table_info(grabbit_dedupe_journal)").all() as { name: string }[]).map((c) => c.name);
-  for (const [name, type] of [["uid", "TEXT"], ["held_dev", "TEXT"], ["held_ino", "TEXT"], ["purged_bytes", "INTEGER"]]) {
+  for (const [name, type] of [["uid", "TEXT"], ["held_dev", "TEXT"], ["held_ino", "TEXT"], ["purged_bytes", "INTEGER"], ["drop_refs", "TEXT"]]) {
     if (cols.includes(name)) continue;
     try {
       db.exec(`ALTER TABLE grabbit_dedupe_journal ADD COLUMN ${name} ${type}`);
@@ -112,18 +125,18 @@ function ensureJournal(db: Database.Database) {
 
 // fsync a directory so a rename or link in it is on disk before the journal
 // records the outcome.
-// Filesystems that cannot fsync a directory (some FUSE and network mounts
-// answer EINVAL or EPERM) are left as they are, as in Grabbit's fsyncDir().
-const NO_DIR_SYNC = new Set(["EINVAL", "EISDIR", "EPERM", "EBADF", "ENOTSUP", "EACCES"]);
+// Only an fsync the filesystem does not support for directories (some FUSE
+// and network mounts) is tolerated. Every other error, an open that fails
+// (EACCES) or an I/O error, propagates: durability was not confirmed.
+const NO_DIR_SYNC = new Set(["EINVAL", "EISDIR", "ENOTSUP"]);
 function syncDir(dir: string) {
-  let fd: number | null = null;
+  const fd = fs.openSync(dir, "r");
   try {
-    fd = fs.openSync(dir, "r");
     fs.fsyncSync(fd);
   } catch (e) {
     if (!NO_DIR_SYNC.has((e as NodeJS.ErrnoException).code || "")) throw e;
   } finally {
-    if (fd != null) fs.closeSync(fd);
+    fs.closeSync(fd);
   }
 }
 
@@ -327,9 +340,9 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
     const id = Number(
       ctx.db
         .prepare(
-          `INSERT INTO grabbit_dedupe_journal (channel, keep_key, drop_key, role, sha256, bytes, state, uid) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
+          `INSERT INTO grabbit_dedupe_journal (channel, keep_key, drop_key, role, sha256, bytes, state, uid, drop_refs) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
         )
-        .run(drop.channel, keep.key, drop.key, dropRefs[0].role, sha, ds.size, uid).lastInsertRowid
+        .run(drop.channel, keep.key, drop.key, dropRefs[0].role, sha, ds.size, uid, JSON.stringify(dropRefs.map((r) => r.id))).lastInsertRowid
     );
     const trashDir = path.join(drop.dir, TRASH_DIR);
     // A random part makes the name unique even when a journal id comes back
@@ -343,7 +356,9 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
     const tmp = path.join(path.dirname(drop.abs), `.${path.basename(drop.abs).slice(0, 150)}.dedupe-${id}-${crypto.randomBytes(4).toString("hex")}`);
     let heldCreated = false;
     let stageCreated = false;
-    let renamed = false;
+    // The inode the stage name got: the keeper may have been replaced before
+    // the link, and the rollback removes the stage only as this inode.
+    let staged: fs.Stats | null = null;
     try {
       const madeTrash = fs.mkdirSync(trashDir, { recursive: true }) !== undefined;
       fs.linkSync(drop.abs, trashAbs); // the original stays reachable from the trash
@@ -357,31 +372,55 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
       ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET held_dev = ?, held_ino = ? WHERE id = ?`).run(held.dev, held.ino, id);
       fs.linkSync(keep.abs, tmp);
       stageCreated = true;
+      staged = fs.lstatSync(tmp);
+      // The syncs and journal writes above are slow disk I/O. Every check
+      // comes after them and the rename follows at once, with nothing slow in
+      // between: the held name is the hashed drop, the staged name is the
+      // hashed keeper, and the clip's name still is the hashed drop.
+      const hs = fs.lstatSync(trashAbs);
+      const ss = staged;
+      const live = fs.lstatSync(drop.abs);
+      if (hs.dev !== ds.dev || hs.ino !== ds.ino) throw new DedupeError("The held original is not the file that was checked; nothing changed");
+      if (ss.dev !== ks.dev || ss.ino !== ks.ino || ss.size !== ks.size || ss.mtimeMs !== ks.mtimeMs) {
+        throw new DedupeError("The file to keep changed while the merge was prepared; nothing changed");
+      }
+      if (!live.isFile() || live.dev !== ds.dev || live.ino !== ds.ino || live.size !== ds.size || live.mtimeMs !== ds.mtimeMs) {
+        throw new DedupeError("The clip's file changed while the merge was prepared; nothing changed");
+      }
       fs.renameSync(tmp, drop.abs); // atomic: the clip's name now holds the kept bytes
       stageCreated = false;
-      renamed = true;
-      // The new clip name must be on disk before the journal says linked.
-      syncDir(path.dirname(drop.abs));
     } catch (e) {
-      if (renamed) {
-        // The files did change but are not confirmed on disk. The row stays
-        // pending, which restore and purge accept, so nothing is stranded.
-        ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET error = ? WHERE id = ?`).run(String((e as Error).message).slice(0, 300), id);
-        throw new Error(`TikShortis merged the files but could not confirm it on disk (${(e as NodeJS.ErrnoException).code || (e as Error).message}); merge ${id} is pending and can be restored`);
-      }
       // Only names this merge made are removed, and only while they still are
       // the inode it linked: an entry that was already there (EEXIST) is
-      // someone else's and stays.
-      if (stageCreated) unlinkIfSame(tmp, ks);
+      // someone else's and stays. A held name whose clip was replaced
+      // meanwhile is kept: it may be the only name of the older file.
+      if (stageCreated) unlinkIfSame(tmp, staged ?? ks);
       try {
         const now = fs.lstatSync(drop.abs);
         if (heldCreated && now.ino === ds.ino) unlinkIfSame(trashAbs, ds);
       } catch { /* left for a manual look; journal says failed */ }
       ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'failed', error = ?, done_at = datetime('now') WHERE id = ?`).run(String((e as Error).message).slice(0, 300), id);
+      if (e instanceof DedupeError) throw e;
       throw new DedupeError(`TikShortis could not merge the files (${(e as NodeJS.ErrnoException).code || (e as Error).message}); nothing changed`);
     }
-    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'linked', trash_name = ?, done_at = datetime('now') WHERE id = ?`).run(trashName, id);
-    return { id, uid, bytes: ds.size, posts: dropRefs.map((r) => r.id) };
+    // The clip's name has changed: from here on a failure is never answered
+    // as "nothing changed".
+    let durable = true;
+    try {
+      // The new clip name should be on disk before the journal says linked.
+      // The merge is done either way, so a failed sync is reported in the
+      // answer (durable: false), not as a failure.
+      syncDir(path.dirname(drop.abs));
+    } catch (e) {
+      durable = false;
+      console.error(`[grabbit-dedupe] merge ${id}: the clip's folder could not be synced (${(e as NodeJS.ErrnoException).code || (e as Error).message})`);
+    }
+    try {
+      ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'linked', trash_name = ?, error = ?, done_at = datetime('now') WHERE id = ?`).run(trashName, durable ? null : "clip folder sync failed", id);
+    } catch (e) {
+      throw mayHaveChanged(`TikShortis merged the files but could not record it (${(e as Error).message}); merge ${id} is pending and can be restored`, id, uid);
+    }
+    return { id, uid, bytes: ds.size, posts: dropRefs.map((r) => r.id), durable };
   } finally {
     busy = false;
   }
@@ -401,6 +440,19 @@ interface JournalRow {
   held_dev: string | null;
   held_ino: string | null;
   purged_bytes: number | null;
+  drop_refs: string | null;
+}
+
+// The post ids that used the dropped file when it was merged, or null for a
+// row written before they were recorded.
+function dropOwners(row: JournalRow): number[] | null {
+  if (row.drop_refs == null) return null;
+  try {
+    const ids = JSON.parse(row.drop_refs);
+    return Array.isArray(ids) && ids.length && ids.every((n) => Number.isSafeInteger(n) && n > 0) ? ids : null;
+  } catch {
+    return null;
+  }
 }
 
 // The row for {id, uid}. A retry of the action that already completed it
@@ -454,9 +506,28 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
   // The clip must still name this file. A clip moved to another profile (or
   // renamed, or deleted) points elsewhere now; restoring would recreate a
   // file no clip uses.
-  if (!refsOf(ctx.db, row.channel, row.drop_key).some((r) => r.role === row.role)) {
+  const owners = dropOwners(row);
+  if (!owners) {
+    throw new DedupeError(
+      "This merge was recorded before TikShortis kept which posts used the file, so it cannot check that restoring is safe; nothing changed",
+      409,
+      "Check the clip by hand in TikShortis and restore the held original manually if it is still needed."
+    );
+  }
+  const refs = refsOf(ctx.db, row.channel, row.drop_key).filter((r) => r.role === row.role);
+  if (!refs.length) {
     throw new DedupeError(
       "No clip uses the merged file's name any more (the clip was moved, renamed or deleted); restoring would create a file no clip uses, so nothing changed",
+      409,
+      "Delete the held original instead, or restore it by hand."
+    );
+  }
+  // Only a post that used the file at merge time may get it back: a later
+  // upload that reuses the name (after the original post moved) is another
+  // clip, and the held original would overwrite or stand in for its file.
+  if (!refs.some((r) => owners.includes(r.id))) {
+    throw new DedupeError(
+      "The posts that used the merged file no longer use its name (another post uses it now); nothing changed",
       409,
       "Delete the held original instead, or restore it by hand."
     );
@@ -501,6 +572,18 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
       unlinkIfSame(tmp, staged);
       throw new DedupeError(HELD_REPLACED, 409, "Check the trash folder by hand in TikShortis.");
     }
+    // The last look at the clip's name right before the rename replaces it:
+    // still what was checked above (or still absent).
+    let again: fs.Stats | null = null;
+    try {
+      again = fs.lstatSync(drop.abs);
+    } catch {
+      again = null;
+    }
+    if ((cur == null) !== (again == null) || (cur && again && (cur.dev !== again.dev || cur.ino !== again.ino))) {
+      unlinkIfSame(tmp, held);
+      throw new DedupeError("The clip's file changed while restoring; the held original is kept, nothing changed");
+    }
     try {
       fs.renameSync(tmp, drop.abs);
     } catch (e) {
@@ -511,11 +594,39 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
   // On every path, also a retry that finds the clip's name already on the
   // held inode: the clip's name, and every folder on its way (some may have
   // been created just now or by an earlier attempt), must be on disk before
-  // the journal says restored and the held name goes.
-  syncUp(path.dirname(drop.abs), dir);
+  // the journal says restored and the held name goes. A failure here leaves
+  // the row as it was and the held name in place, so a retry finishes it.
+  try {
+    syncUp(path.dirname(drop.abs), dir);
+  } catch (e) {
+    throw mayHaveChanged(
+      `TikShortis put the original back but could not confirm it on disk (${(e as NodeJS.ErrnoException).code || (e as Error).message}); the held original is kept, try the restore again`,
+      row.id,
+      row.uid
+    );
+  }
+  // The syncs were slow disk I/O: the clip's name must still be the held
+  // inode, or a writer replaced it and the held name is the original's only
+  // name. Checked again after the journal write, right before the held name
+  // goes; on a mismatch the row goes back to its earlier state.
+  const stillHeld = () => {
+    try {
+      const st = fs.lstatSync(drop.abs);
+      return st.dev === held.dev && st.ino === held.ino;
+    } catch {
+      return false;
+    }
+  };
+  const replaced = () =>
+    new DedupeError("The clip's file was replaced while it was being restored; the held original is kept, nothing more changed", 409, "Check the clip by hand in TikShortis.");
+  if (!stillHeld()) throw replaced();
   // State first: a held copy left behind by a crash after this point is a
   // harmless extra name, while the reverse order would strand the record.
   ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
+  if (!stillHeld()) {
+    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = ?, done_at = NULL, error = ? WHERE id = ?`).run(row.state, "clip replaced during restore", row.id);
+    throw replaced();
+  }
   unlinkIfSame(trashAbs, held); // an extra name of the restored file if it stays
   return { id: row.id, restored: `${row.channel}/${row.drop_key}` };
 }

@@ -26,7 +26,7 @@ function denied(request: Request): NextResponse | null {
 
 function fail(e: unknown): NextResponse {
   if (e instanceof DedupeError) {
-    return NextResponse.json({ error: e.message, fix: e.fix }, { status: e.status });
+    return NextResponse.json({ error: e.message, fix: e.fix, ...(e.extra || {}) }, { status: e.status });
   }
   console.error("[grabbit-dedupe]", e);
   // 422, not 5xx: a proxy in front may replace a 5xx body with its own page.
