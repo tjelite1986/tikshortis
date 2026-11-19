@@ -43,7 +43,7 @@ function withFrameAncestors(res: NextResponse): NextResponse {
   return res;
 }
 
-const DEDUPE_OPS = /^\/api\/dedupe\/v1\/(lookup|link|restore|purge)$/;
+const DEDUPE_OPS = /^\/api\/dedupe\/v1\/(lookup|link|opstatus|restore|purge)$/;
 
 function guard(request: NextRequest): NextResponse {
   if (request.method === "GET" || request.method === "HEAD") {

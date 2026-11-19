@@ -18,10 +18,14 @@ import type Database from "better-sqlite3";
  *   restore Undo a link.
  *   purge   Delete a held original for good.
  *   lookup  Which posts use a file (for the review screen).
+ *   opstatus What became of a link call whose answer Grabbit lost (by the
+ *           key Grabbit sent with it).
  *
  * No row changes: storage_key and poster_key keep pointing at the same names.
- * Every step on a name is atomic (link to a temp name, rename over), so the
- * hourly orphan sweep never sees a clip without its file. A clip later
+ * A clip's name is swapped by taking it aside and linking the new file in
+ * (see replaceWith), all in one synchronous run with no await, so the orphan
+ * sweep, which runs in this process and is synchronous too, can never see a
+ * clip without its file. A clip later
  * deleted, moved or re-transcoded acts on its own name only; the other post
  * keeps its file.
  *
@@ -129,6 +133,19 @@ function ensureJournal(db: Database.Database) {
     }
   }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS grabbit_dedupe_journal_uid ON grabbit_dedupe_journal (uid)");
+  // Grabbit's key for each link call. A link answer lost on the way (a
+  // timeout, a cut connection) leaves Grabbit not knowing whether the merge
+  // happened; opstatus answers that by the key. state: 'started' (the link
+  // claimed the key; journal_id is set once it wrote its journal row, before
+  // any file changes), 'refused' (it stopped before changing anything) or
+  // 'fenced' (opstatus found no link with that key and closed it, so a late
+  // link with the key is refused and the answer "nothing changed" stays true).
+  db.exec(`CREATE TABLE IF NOT EXISTS grabbit_dedupe_ops (
+    op TEXT PRIMARY KEY,
+    state TEXT NOT NULL CHECK (state IN ('started', 'refused', 'fenced')),
+    journal_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
 }
 
 // fsync a directory so a rename or link in it is on disk before the journal
@@ -184,6 +201,46 @@ function unlinkIfSame(abs: string, want: fs.Stats) {
     const st = fs.lstatSync(abs);
     if (st.dev === want.dev && st.ino === want.ino) fs.unlinkSync(abs);
   } catch { /* gone already, or left for a manual look */ }
+}
+
+// Linux has no unlink-if-inode and Node has no renameat2, so the last check
+// and the change after it are two system calls, and a writer (the
+// transcoder, an import) can replace the clip's name in between. The name is
+// therefore never replaced blind: it is first renamed aside, to a random name
+// in the same folder (atomic, a name no one else knows), and only what was
+// taken aside is judged. Anything other than the checked file goes back under
+// its name (a link, which never clobbers), so the writer's file is never lost.
+// The new file then comes in with a link too: a name made in the moment
+// between wins. Returns false when the name held another file (put back;
+// `stage` stays for the caller to undo).
+function putBack(aside: string, abs: string) {
+  try {
+    fs.linkSync(aside, abs);
+  } catch (e) {
+    console.error(`[grabbit-dedupe] ${path.basename(abs)} changed again meanwhile; the file that held its name stays at ${aside} (${(e as NodeJS.ErrnoException).code || (e as Error).message})`);
+    return;
+  }
+  try { fs.unlinkSync(aside); } catch { /* an extra name of the same file */ }
+}
+
+function replaceWith(abs: string, match: (st: fs.Stats) => boolean, stage: string): boolean {
+  const aside = path.join(path.dirname(abs), `.${path.basename(abs).slice(0, 150)}.aside-${crypto.randomBytes(4).toString("hex")}`);
+  fs.renameSync(abs, aside);
+  let st: fs.Stats | null = null;
+  try { st = fs.lstatSync(aside); } catch { st = null; }
+  if (!st || !st.isFile() || !match(st)) {
+    putBack(aside, abs);
+    return false;
+  }
+  try {
+    fs.linkSync(stage, abs);
+  } catch (e) {
+    putBack(aside, abs);
+    throw e;
+  }
+  try { fs.unlinkSync(stage); } catch { /* an extra name of the new file */ }
+  try { fs.unlinkSync(aside); } catch { /* an extra name of the checked file */ }
+  return true;
 }
 
 // Removes the held name for a finished restore or purge. "removed" or "gone"
@@ -332,8 +389,68 @@ export function lookup(ctx: Ctx, paths: unknown) {
 
 let busy = false;
 
-export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha256?: unknown }) {
+// Link calls running in this process, by Grabbit's key.
+const runningOps = new Set<string>();
+
+function opKey(v: unknown): string | null {
+  if (v == null) return null;
+  if (typeof v !== "string" || !/^[0-9a-f]{32}$/.test(v)) throw new DedupeError("op must be 32 hex characters", 400);
+  return v;
+}
+
+type LinkBody = { keep?: unknown; drop?: unknown; sha256?: unknown; op?: unknown };
+
+export async function link(ctx: Ctx, body: LinkBody) {
   ensureJournal(ctx.db);
+  const op = opKey(body.op);
+  if (!op) return linkFiles(ctx, body, null);
+  // The key is claimed before anything else; a key seen before (a repeated
+  // call, or one opstatus already closed) is refused and changes nothing.
+  try {
+    ctx.db.prepare("INSERT INTO grabbit_dedupe_ops (op, state) VALUES (?, 'started')").run(op);
+  } catch (e) {
+    if (String(e).includes("UNIQUE")) throw new DedupeError("This merge request was already received or checked; nothing changed", 409);
+    throw e;
+  }
+  runningOps.add(op);
+  try {
+    return await linkFiles(ctx, body, op);
+  } catch (e) {
+    // Stopped before its journal row: nothing was changed. After it, the
+    // journal row says what happened.
+    try { ctx.db.prepare("UPDATE grabbit_dedupe_ops SET state = 'refused' WHERE op = ? AND journal_id IS NULL").run(op); } catch { /* opstatus sees started, not running */ }
+    throw e;
+  } finally {
+    runningOps.delete(op);
+  }
+}
+
+// What became of the link call with Grabbit's key `op`. A key no link has
+// claimed is fenced, so the answer "not found" cannot turn false later.
+export function opStatus(ctx: Ctx, v: unknown) {
+  ensureJournal(ctx.db);
+  const op = opKey(v);
+  if (!op) throw new DedupeError("op is required", 400);
+  ctx.db.prepare("INSERT OR IGNORE INTO grabbit_dedupe_ops (op, state) VALUES (?, 'fenced')").run(op);
+  const r = ctx.db.prepare("SELECT state, journal_id FROM grabbit_dedupe_ops WHERE op = ?").get(op) as { state: string; journal_id: number | null };
+  if (r.state === "started" && r.journal_id == null) {
+    if (runningOps.has(op)) return { op, found: true, inProgress: true };
+    // Claimed, but the process stopped before the journal row (a restart):
+    // no file was changed. Closed so the answer stays true.
+    ctx.db.prepare("UPDATE grabbit_dedupe_ops SET state = 'refused' WHERE op = ? AND journal_id IS NULL").run(op);
+    return { op, found: false };
+  }
+  if (r.journal_id == null) return { op, found: false };
+  const j = ctx.db.prepare("SELECT id, uid, bytes, state, drop_refs FROM grabbit_dedupe_journal WHERE id = ?").get(r.journal_id) as
+    | { id: number; uid: string | null; bytes: number; state: string; drop_refs: string | null }
+    | undefined;
+  if (!j) throw new DedupeError("The journal row for this merge is missing; check by hand", 409);
+  let posts: number[] = [];
+  try { posts = JSON.parse(j.drop_refs || "[]"); } catch { posts = []; }
+  return { op, found: true, inProgress: runningOps.has(op), id: j.id, uid: j.uid, bytes: j.bytes, state: j.state, posts };
+}
+
+async function linkFiles(ctx: Ctx, body: LinkBody, op: string | null) {
   const keep = parsePath(ctx, body.keep);
   const drop = parsePath(ctx, body.drop);
   const sha = typeof body.sha256 === "string" && /^[0-9a-f]{64}$/.test(body.sha256) ? body.sha256 : null;
@@ -376,13 +493,21 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
     // sends both on restore and purge, so an old reference never reaches a
     // newer merge that reused the id.
     const uid = crypto.randomBytes(16).toString("hex");
-    const id = Number(
-      ctx.db
-        .prepare(
-          `INSERT INTO grabbit_dedupe_journal (channel, keep_key, drop_key, role, sha256, bytes, state, uid, drop_refs) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
-        )
-        .run(drop.channel, keep.key, drop.key, dropRefs[0].role, sha, ds.size, uid, JSON.stringify(dropRefs.map((r) => r.id))).lastInsertRowid
-    );
+    // The journal row and the key's link to it go in together, before any
+    // file changes.
+    const id = ctx.db.transaction(() => {
+      const jid = Number(
+        ctx.db
+          .prepare(
+            `INSERT INTO grabbit_dedupe_journal (channel, keep_key, drop_key, role, sha256, bytes, state, uid, drop_refs) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+          )
+          .run(drop.channel, keep.key, drop.key, dropRefs[0].role, sha, ds.size, uid, JSON.stringify(dropRefs.map((r) => r.id))).lastInsertRowid
+      );
+      if (op && ctx.db.prepare("UPDATE grabbit_dedupe_ops SET journal_id = ? WHERE op = ? AND state = 'started'").run(jid, op).changes !== 1) {
+        throw new DedupeError("This merge request was closed meanwhile; nothing changed", 409);
+      }
+      return jid;
+    })();
     const trashDir = path.join(drop.dir, TRASH_DIR);
     // A random part makes the name unique even when a journal id comes back
     // (a restored database): an EEXIST rollback then never meets another
@@ -436,7 +561,12 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
       if (!live.isFile() || live.dev !== ds.dev || live.ino !== ds.ino || live.size !== ds.size || live.mtimeMs !== ds.mtimeMs) {
         throw new DedupeError("The clip's file changed while the merge was prepared; nothing changed");
       }
-      fs.renameSync(tmp, drop.abs); // atomic: the clip's name now holds the kept bytes
+      // The clip's name now holds the kept bytes. It is taken aside first, so
+      // a file a writer put there after the look above goes back instead of
+      // being overwritten.
+      if (!replaceWith(drop.abs, (n) => n.dev === ds.dev && n.ino === ds.ino && n.size === ds.size && n.mtimeMs === ds.mtimeMs, tmp)) {
+        throw new DedupeError("The clip's file changed while the merge was prepared; nothing changed");
+      }
       stageCreated = false;
     } catch (e) {
       // Only names this merge made are removed, and only while they still are
@@ -682,11 +812,27 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
       unlinkIfSame(tmp, held);
       throw new DedupeError("The clip's file changed while restoring; the held original is kept, nothing changed");
     }
+    // An absent name is made with a link, which never clobbers; a present one
+    // (the merged inode) is taken aside first and goes back if it is not.
+    // Either way a file a writer put there after the look above stays.
+    let placed = false;
     try {
-      fs.renameSync(tmp, drop.abs);
+      if (again == null) {
+        fs.linkSync(tmp, drop.abs);
+        unlinkIfSame(tmp, held);
+        placed = true;
+      } else {
+        const want = again;
+        placed = replaceWith(drop.abs, (n) => n.dev === want.dev && n.ino === want.ino, tmp);
+      }
     } catch (e) {
       unlinkIfSame(tmp, held);
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new DedupeError("The clip's file changed while restoring; the held original is kept, nothing changed");
       throw e;
+    }
+    if (!placed) {
+      unlinkIfSame(tmp, held);
+      throw new DedupeError("The clip's file changed while restoring; the held original is kept, nothing changed");
     }
   }
   // On every path, also a retry that finds the clip's name already on the

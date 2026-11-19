@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { SHORTS_ROOT } from "@/lib/shorts-storage";
-import { DedupeError, link, lookup, purge, restore, status, tokenOk, type Ctx } from "@/lib/grabbit-dedupe";
+import { DedupeError, link, lookup, opStatus, purge, restore, status, tokenOk, type Ctx } from "@/lib/grabbit-dedupe";
 
 export const dynamic = "force-dynamic";
 
 // Grabbit dedupe v1 (see lib/grabbit-dedupe.ts). Machine-to-machine only:
 // every call needs X-Grabbit-Dedupe-Token; there is no session path.
 //   POST lookup  { paths: string[] }
-//   POST link    { keep, drop, sha256 }
+//   POST link    { keep, drop, sha256, op? }
+//   POST opstatus { op }
 //   POST restore { id, uid }
 //   POST purge   { id, uid }
 //   GET  status
@@ -63,6 +64,8 @@ export async function POST(request: Request, { params }: Params) {
         return NextResponse.json({ items: lookup(ctx(), body.paths) });
       case "link":
         return NextResponse.json(await link(ctx(), body));
+      case "opstatus":
+        return NextResponse.json(opStatus(ctx(), body.op));
       case "restore":
         return NextResponse.json(restore(ctx(), body.id, body.uid));
       case "purge":
