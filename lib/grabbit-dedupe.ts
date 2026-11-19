@@ -26,8 +26,8 @@ import type Database from "better-sqlite3";
  * keeps its file.
  *
  * Auth: X-Grabbit-Dedupe-Token, compared in constant time with the secret in
- * GRABBIT_DEDUPE_TOKEN_FILE (or GRABBIT_DEDUPE_TOKEN). Unset = every route
- * refuses.
+ * GRABBIT_DEDUPE_TOKEN_FILE, read on every check. Unset, missing, unreadable
+ * or shorter than 32 characters = every route refuses.
  */
 
 export const TRASH_DIR = ".grabbit-dedupe-trash";
@@ -44,11 +44,10 @@ export class DedupeError extends Error {
   }
 }
 
-let cachedToken: { at: number; value: string | null } | null = null;
 export function expectedToken(): string | null {
-  if (cachedToken && Date.now() - cachedToken.at < 60_000) return cachedToken.value;
-  // The mounted file is the only source, the same one Grabbit reads; a missing
-  // or unreadable file switches the routes off.
+  // The mounted file is the only source, the same one Grabbit reads. It is
+  // read on every check, so a rotated or removed token takes effect at once;
+  // a missing or unreadable file switches the routes off.
   let value: string | null = null;
   const file = process.env.GRABBIT_DEDUPE_TOKEN_FILE;
   if (file) {
@@ -59,7 +58,6 @@ export function expectedToken(): string | null {
     }
   }
   if (value && value.length < 32) value = null;
-  cachedToken = { at: Date.now(), value };
   return value;
 }
 
@@ -228,12 +226,15 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
         .run(drop.channel, keep.key, drop.key, dropRefs[0].role, sha, ds.size).lastInsertRowid
     );
     const trashDir = path.join(drop.dir, TRASH_DIR);
-    const trashName = `${id}-${path.basename(drop.key).slice(0, 150)}`;
+    // A random part makes the name unique even when a journal id comes back
+    // (a restored database): an EEXIST rollback then never meets another
+    // merge's held file.
+    const trashName = `${id}-${crypto.randomBytes(4).toString("hex")}-${path.basename(drop.key).slice(0, 150)}`;
     // The trash name is on record before any file changes, so an interrupted
     // merge can still be restored or purged (see journal()).
     ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET trash_name = ? WHERE id = ?`).run(trashName, id);
     const trashAbs = path.join(trashDir, trashName);
-    const tmp = path.join(path.dirname(drop.abs), `.${path.basename(drop.abs)}.dedupe-${id}`);
+    const tmp = path.join(path.dirname(drop.abs), `.${path.basename(drop.abs).slice(0, 150)}.dedupe-${id}-${crypto.randomBytes(4).toString("hex")}`);
     let heldCreated = false;
     try {
       fs.mkdirSync(trashDir, { recursive: true });
@@ -319,10 +320,20 @@ export function restore(ctx: Ctx, id: unknown) {
       "Delete the held original instead, or restore it by hand."
     );
   }
-  const tmp = path.join(path.dirname(drop.abs), `.${path.basename(drop.abs)}.restore-${row.id}`);
-  fs.mkdirSync(path.dirname(drop.abs), { recursive: true });
-  fs.linkSync(trashAbs, tmp);
-  fs.renameSync(tmp, drop.abs);
+  // A merge stopped before its rename leaves the clip's name on the held
+  // original itself; renaming a name over the same inode is a no-op that
+  // would strand the temp link, so there is nothing to move back.
+  if (!cur || cur.ino !== held.ino) {
+    const tmp = path.join(path.dirname(drop.abs), `.${path.basename(drop.abs).slice(0, 150)}.restore-${row.id}-${crypto.randomBytes(4).toString("hex")}`);
+    fs.mkdirSync(path.dirname(drop.abs), { recursive: true });
+    fs.linkSync(trashAbs, tmp);
+    try {
+      fs.renameSync(tmp, drop.abs);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch { /* not there */ }
+      throw e;
+    }
+  }
   // State first: a held copy left behind by a crash after this point is a
   // harmless extra name, while the reverse order would strand the record.
   ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
