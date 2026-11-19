@@ -16,10 +16,11 @@ import { contentSecurityPolicy } from "@/lib/csp.mjs";
  * route that forgets it is indistinguishable from one that does not need it,
  * and there are forty of them.
  *
- * Two ways past it, both deliberate:
+ * Three ways past it, all deliberate:
  *  - a matching Origin (or, for older clients, a Referer on this host);
  *  - the admin token, which the host timers present. They are not browsers,
- *    send no Origin, and hold a credential no page can read.
+ *    send no Origin, and hold a credential no page can read;
+ *  - Grabbit's dedupe token, for the same reason.
  */
 export function middleware(request: NextRequest) {
   return withFrameAncestors(guard(request));
@@ -50,6 +51,8 @@ function guard(request: NextRequest): NextResponse {
   // Presence, not validity: the routes verify the token themselves. This only
   // decides whether the request looks like a browser's.
   if (request.headers.get("x-admin-token")) return NextResponse.next();
+  // Same reasoning for Grabbit's dedupe calls (app/api/dedupe/v1).
+  if (request.headers.get("x-grabbit-dedupe-token")) return NextResponse.next();
 
   const host = request.headers.get("host");
   const origin = request.headers.get("origin");
