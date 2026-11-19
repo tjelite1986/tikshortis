@@ -499,6 +499,27 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
   try {
     held = fs.lstatSync(trashAbs);
   } catch {
+    // A restore that put the original back and removed its held name, but
+    // could not record that (a crash, a failed journal write), leaves the
+    // clip's name on the held inode: finish recording it. Only a row with a
+    // recorded identity can tell that inode apart.
+    if (row.held_dev != null && row.held_ino != null) {
+      let back = false;
+      try {
+        const now = identity(drop.abs);
+        back = now.dev === row.held_dev && now.ino === row.held_ino;
+      } catch {
+        back = false;
+      }
+      if (back) {
+        try {
+          ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
+        } catch (e) {
+          throw mayHaveChanged(`The original is back but TikShortis could not record it (${(e as Error).message}); try the restore again`, row.id, row.uid);
+        }
+        return { id: row.id, restored: `${row.channel}/${row.drop_key}` };
+      }
+    }
     throw new DedupeError("The held original is missing");
   }
   if (!held.isFile()) throw new DedupeError("The held original is not a file");
@@ -605,10 +626,16 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
       row.uid
     );
   }
+  // From here on the clip's name may already be the original again, so
+  // every failure says the filesystem may have changed (422 mayHaveChanged
+  // with the id and uid); Grabbit then keeps the operation open.
+  //
   // The syncs were slow disk I/O: the clip's name must still be the held
   // inode, or a writer replaced it and the held name is the original's only
-  // name. Checked again after the journal write, right before the held name
-  // goes; on a mismatch the row goes back to its earlier state.
+  // name, which then stays. The row turns 'restored' only after the held
+  // name is gone, so no retry can answer success for a restore that did not
+  // happen; a crash between the two is finished by the next restore call
+  // (see the missing-held branch above).
   const stillHeld = () => {
     try {
       const st = fs.lstatSync(drop.abs);
@@ -617,17 +644,15 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
       return false;
     }
   };
-  const replaced = () =>
-    new DedupeError("The clip's file was replaced while it was being restored; the held original is kept, nothing more changed", 409, "Check the clip by hand in TikShortis.");
-  if (!stillHeld()) throw replaced();
-  // State first: a held copy left behind by a crash after this point is a
-  // harmless extra name, while the reverse order would strand the record.
-  ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
   if (!stillHeld()) {
-    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = ?, done_at = NULL, error = ? WHERE id = ?`).run(row.state, "clip replaced during restore", row.id);
-    throw replaced();
+    throw mayHaveChanged("The clip's file was replaced while it was being restored; the held original is kept", row.id, row.uid);
   }
   unlinkIfSame(trashAbs, held); // an extra name of the restored file if it stays
+  try {
+    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
+  } catch (e) {
+    throw mayHaveChanged(`The original is back but TikShortis could not record it (${(e as Error).message}); try the restore again`, row.id, row.uid);
+  }
   return { id: row.id, restored: `${row.channel}/${row.drop_key}` };
 }
 
@@ -636,6 +661,7 @@ export function purge(ctx: Ctx, id: unknown, uid: unknown) {
   if (row.replay) return { id: row.id, bytes: row.purged_bytes ?? 0 };
   const trashAbs = path.join(ctx.shortsRoot, row.channel, TRASH_DIR, row.trash_name as string);
   let bytes = 0;
+  let unlinked = false;
   try {
     const st = fs.lstatSync(trashAbs);
     if (!st.isFile()) throw new DedupeError("The held original is not a file");
@@ -644,11 +670,18 @@ export function purge(ctx: Ctx, id: unknown, uid: unknown) {
     // by the link, so normally nlink is 1 here).
     bytes = st.nlink === 1 ? st.size : 0;
     fs.unlinkSync(trashAbs);
+    unlinked = true;
   } catch (e) {
     if (e instanceof DedupeError) throw e;
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
-  ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'purged', purged_bytes = ?, done_at = datetime('now') WHERE id = ?`).run(bytes, row.id);
+  try {
+    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'purged', purged_bytes = ?, done_at = datetime('now') WHERE id = ?`).run(bytes, row.id);
+  } catch (e) {
+    // The held original is gone already: Grabbit must not offer it again.
+    if (unlinked) throw mayHaveChanged(`The held original was deleted but TikShortis could not record it (${(e as Error).message}); try the purge again`, row.id, row.uid);
+    throw e;
+  }
   return { id: row.id, bytes };
 }
 
