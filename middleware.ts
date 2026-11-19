@@ -43,6 +43,8 @@ function withFrameAncestors(res: NextResponse): NextResponse {
   return res;
 }
 
+const DEDUPE_OPS = /^\/api\/dedupe\/v1\/(lookup|link|restore|purge)$/;
+
 function guard(request: NextRequest): NextResponse {
   if (request.method === "GET" || request.method === "HEAD") {
     return NextResponse.next();
@@ -51,11 +53,13 @@ function guard(request: NextRequest): NextResponse {
   // Presence, not validity: the routes verify the token themselves. This only
   // decides whether the request looks like a browser's.
   if (request.headers.get("x-admin-token")) return NextResponse.next();
-  // Grabbit's dedupe calls (app/api/dedupe/v1) skip the origin check only on
-  // their own routes, which verify the token themselves. The header opens no
-  // other route.
+  // Grabbit's dedupe calls skip the origin check only on the exact dedupe
+  // operations (app/api/dedupe/v1/[op]), whose handler verifies the token
+  // before it reads the body. The header opens no other route. A browser
+  // cannot send a custom header cross-site without a CORS preflight, which
+  // this app never answers.
   if (
-    request.nextUrl.pathname.startsWith("/api/dedupe/v1/") &&
+    DEDUPE_OPS.test(request.nextUrl.pathname) &&
     request.headers.get("x-grabbit-dedupe-token")
   ) {
     return NextResponse.next();

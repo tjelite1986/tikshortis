@@ -363,6 +363,15 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
     if (ks2.ino !== ks.ino || ds2.ino !== ds.ino || ks2.mtimeMs !== ks.mtimeMs || ds2.mtimeMs !== ds.mtimeMs) {
       throw new DedupeError("A file changed while it was checked; try again");
     }
+    // The hashing can take long: an app operation may meanwhile have moved,
+    // deleted or reassigned a post while the file names stayed. The posts
+    // and roles are read again and must be what was checked above.
+    const keepNow = refsOf(ctx.db, keep.channel, keep.key);
+    const dropNow = refsOf(ctx.db, drop.channel, drop.key);
+    const sig = (refs: RefRow[]) => refs.map((r) => `${r.id}:${r.role}`).join(",");
+    if (!keepNow.length || sig(dropNow) !== sig(dropRefs) || keepNow[0].role !== dropRefs[0].role) {
+      throw new DedupeError("The posts using these files changed while they were checked; scan again");
+    }
     // The id can come back after a database restore; the uid cannot. Grabbit
     // sends both on restore and purge, so an old reference never reaches a
     // newer merge that reused the id.
@@ -413,12 +422,15 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
       // The syncs and journal writes above are slow disk I/O. Every check
       // comes after them and the rename follows at once, with nothing slow in
       // between: the held name is the hashed drop, the staged name is the
-      // hashed keeper, and the clip's name still is the hashed drop.
+      // hashed keeper (read again now, not the stat from before the journal
+      // write) and the inode on record, and the clip's name still is the
+      // hashed drop.
       const hs = fs.lstatSync(trashAbs);
-      const ss = staged;
+      const ss = fs.lstatSync(tmp);
+      const sNow = identity(tmp);
       const live = fs.lstatSync(drop.abs);
       if (hs.dev !== ds.dev || hs.ino !== ds.ino) throw new DedupeError("The held original is not the file that was checked; nothing changed");
-      if (ss.dev !== ks.dev || ss.ino !== ks.ino || ss.size !== ks.size || ss.mtimeMs !== ks.mtimeMs) {
+      if (!ss.isFile() || ss.dev !== ks.dev || ss.ino !== ks.ino || ss.size !== ks.size || ss.mtimeMs !== ks.mtimeMs || sNow.dev !== st.dev || sNow.ino !== st.ino) {
         throw new DedupeError("The file to keep changed while the merge was prepared; nothing changed");
       }
       if (!live.isFile() || live.dev !== ds.dev || live.ino !== ds.ino || live.size !== ds.size || live.mtimeMs !== ds.mtimeMs) {
@@ -654,10 +666,16 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
     }
     // The last look at the clip's name right before the rename replaces it:
     // still what was checked above (or still absent).
+    // Only ENOENT means absent: an EIO or EACCES says nothing about the
+    // name, so the restore stops and the held original stays.
     let again: fs.Stats | null = null;
     try {
       again = fs.lstatSync(drop.abs);
-    } catch {
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        unlinkIfSame(tmp, held);
+        throw new DedupeError(`The clip's file cannot be checked (${(e as NodeJS.ErrnoException).code || (e as Error).message}); the held original is kept, nothing changed`);
+      }
       again = null;
     }
     if ((cur == null) !== (again == null) || (cur && again && (cur.dev !== again.dev || cur.ino !== again.ino))) {
@@ -755,23 +773,43 @@ export function purge(ctx: Ctx, id: unknown, uid: unknown) {
     }
   }
   try {
-    const st = fs.lstatSync(trashAbs);
-    if (!st.isFile()) throw new DedupeError("The held original is not a file");
+    const st0 = fs.lstatSync(trashAbs);
+    if (!st0.isFile()) throw new DedupeError("The held original is not a file");
     if (!heldMatches(row, trashAbs)) throw new DedupeError(HELD_REPLACED, 409, "Check the trash folder by hand in TikShortis.");
-    // Freed only if no live name shares it (the clip's own name was replaced
-    // by the link, so normally nlink is 1 here).
-    bytes = st.nlink === 1 ? st.size : 0;
-    // On record before the held name goes (see restore).
+    // On record before the held name goes (see restore). The write can
+    // block, so the held name is checked again after it, and the unlink
+    // follows that check with nothing slow in between.
     try {
       ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET held_action = 'purge' WHERE id = ?`).run(row.id);
     } catch (e) {
       throw new DedupeError(`TikShortis could not record the delete (${(e as Error).message}); nothing changed`, 422);
     }
+    const st = fs.lstatSync(trashAbs);
+    if (!st.isFile() || st.dev !== st0.dev || st.ino !== st0.ino || !heldMatches(row, trashAbs)) {
+      throw new DedupeError(HELD_REPLACED, 409, "Check the trash folder by hand in TikShortis.");
+    }
+    // Freed only if no live name shares it (the clip's own name was replaced
+    // by the link, so normally nlink is 1 here).
+    bytes = st.nlink === 1 ? st.size : 0;
     fs.unlinkSync(trashAbs);
     unlinked = true;
   } catch (e) {
     if (e instanceof DedupeError) throw e;
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  // The removal must be on disk before the journal says purged: otherwise a
+  // power loss could bring the held name back under a row that every retry
+  // answers as done. Also on a retry that finds the name already gone.
+  try {
+    syncDir(path.dirname(trashAbs));
+  } catch (e) {
+    // No trash folder at all: the held name certainly is not coming back.
+    const noFolder = !unlinked && (e as NodeJS.ErrnoException).code === "ENOENT";
+    if (!noFolder) {
+      const msg = `TikShortis could not confirm the delete on disk (${(e as NodeJS.ErrnoException).code || (e as Error).message}); try the purge again`;
+      if (unlinked) throw mayHaveChanged(msg, row.id, row.uid);
+      throw new DedupeError(msg, 422);
+    }
   }
   try {
     ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'purged', purged_bytes = ?, done_at = datetime('now') WHERE id = ?`).run(bytes, row.id);
