@@ -427,7 +427,7 @@ export async function link(ctx: Ctx, body: LinkBody) {
 
 // What became of the link call with Grabbit's key `op`. A key no link has
 // claimed is fenced, so the answer "not found" cannot turn false later.
-export function opStatus(ctx: Ctx, v: unknown) {
+export async function opStatus(ctx: Ctx, v: unknown) {
   ensureJournal(ctx.db);
   const op = opKey(v);
   if (!op) throw new DedupeError("op is required", 400);
@@ -451,7 +451,7 @@ export function opStatus(ctx: Ctx, v: unknown) {
   let state = j.state;
   let stopped = false;
   if (state === "pending" && !running && !busy) {
-    state = reconcileStopped(ctx, j.id);
+    state = await reconcileStopped(ctx, j.id);
     stopped = state === "pending";
   }
   return { op, found: true, inProgress: running, id: j.id, uid: j.uid, bytes: j.bytes, state, stopped, posts };
@@ -463,10 +463,11 @@ export function opStatus(ctx: Ctx, v: unknown) {
 //   name is only a second name of that same original: nothing changed (the
 //   extra held name is removed) -> 'failed';
 // - the held name is the recorded original and the clip holds the recorded
-//   keeper inode: the merge finished but was not recorded -> 'linked';
+//   keeper inode, and both still hash to the journaled bytes (an inode can be
+//   rewritten in place): the merge finished but was not recorded -> 'linked';
 // - anything else cannot be told apart safely -> stays 'pending' for a check
 //   by hand. Only 'linked' lets Grabbit list it as a restorable merge.
-function reconcileStopped(ctx: Ctx, id: number): string {
+async function reconcileStopped(ctx: Ctx, id: number): Promise<string> {
   const row = ctx.db.prepare(`SELECT * FROM grabbit_dedupe_journal WHERE id = ?`).get(id) as JournalRow | undefined;
   if (!row || row.state !== "pending") return row ? row.state : "pending";
   try {
@@ -498,6 +499,20 @@ function reconcileStopped(ctx: Ctx, id: number): string {
     }
     if (!h.isFile() || !heldMatches(row, trashAbs as string) || row.held_ino == null) return "pending";
     if (isKeep) {
+      // Same inodes do not prove the bytes: either file may have been
+      // rewritten in place since. Both must hash to the journaled SHA-256,
+      // and afterwards still be the same files, unchanged, before the merge
+      // is certified as restorable. Anything else stays pending.
+      const held = trashAbs as string;
+      const [hh, dh] = await Promise.all([sha256Of(held), sha256Of(drop.abs)]);
+      if (hh !== row.sha256 || dh !== row.sha256) return "pending";
+      const same = (a: fs.Stats | null | "error", b: fs.Stats) =>
+        !!a && a !== "error" && a.isFile() && a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+      const cur = ctx.db.prepare(`SELECT state FROM grabbit_dedupe_journal WHERE id = ?`).get(row.id) as { state: string } | undefined;
+      if (!cur || cur.state !== "pending" || busy) return cur ? cur.state : "pending";
+      if (!same(look(held), h) || !same(look(drop.abs), d as fs.Stats) || !heldMatches(row, held)) return "pending";
+      const dNow = identity(drop.abs);
+      if (dNow.dev !== row.keep_dev || dNow.ino !== row.keep_ino) return "pending";
       ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'linked', error = ?, done_at = datetime('now') WHERE id = ? AND state = 'pending'`).run("finished before a stop, recorded later", row.id);
       return "linked";
     }

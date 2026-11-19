@@ -65,7 +65,7 @@ export async function POST(request: Request, { params }: Params) {
       case "link":
         return NextResponse.json(await link(ctx(), body));
       case "opstatus":
-        return NextResponse.json(opStatus(ctx(), body.op));
+        return NextResponse.json(await opStatus(ctx(), body.op));
       case "restore":
         return NextResponse.json(restore(ctx(), body.id, body.uid));
       case "purge":
