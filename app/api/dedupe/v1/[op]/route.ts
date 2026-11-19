@@ -9,8 +9,8 @@ export const dynamic = "force-dynamic";
 // every call needs X-Grabbit-Dedupe-Token; there is no session path.
 //   POST lookup  { paths: string[] }
 //   POST link    { keep, drop, sha256 }
-//   POST restore { id }
-//   POST purge   { id }
+//   POST restore { id, uid }
+//   POST purge   { id, uid }
 //   GET  status
 
 type Params = { params: Promise<{ op: string }> };
@@ -64,9 +64,9 @@ export async function POST(request: Request, { params }: Params) {
       case "link":
         return NextResponse.json(await link(ctx(), body));
       case "restore":
-        return NextResponse.json(restore(ctx(), body.id));
+        return NextResponse.json(restore(ctx(), body.id, body.uid));
       case "purge":
-        return NextResponse.json(purge(ctx(), body.id));
+        return NextResponse.json(purge(ctx(), body.id, body.uid));
       default:
         return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
