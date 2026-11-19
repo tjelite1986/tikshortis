@@ -103,16 +103,24 @@ function ensureJournal(db: Database.Database) {
     held_dev TEXT,
     held_ino TEXT,
     purged_bytes INTEGER,
-    drop_refs TEXT
+    drop_refs TEXT,
+    keep_dev TEXT,
+    keep_ino TEXT,
+    held_action TEXT
   )`);
   // Guarded ALTERs for journals created before these columns existed (same
   // pattern as lib/db.ts). Older rows keep uid NULL and can never be acted on
   // by uid; rows without held_dev/held_ino fall back to the checks made before
   // the held file's identity was recorded. Rows without drop_refs (the posts
   // that used the dropped file) cannot prove who owns the name and are
-  // refused by restore.
+  // refused by restore. keep_dev/keep_ino are the inode the merge put at the
+  // clip's name (the verified keeper); rows without them fall back to the
+  // keeper's current path. held_action ('restore' or 'purge') is written
+  // before the held name is removed, so a retry finishes that action and the
+  // other one is refused. (The state CHECK cannot be altered in place, hence
+  // a column rather than a new state.)
   const cols = (db.prepare("PRAGMA table_info(grabbit_dedupe_journal)").all() as { name: string }[]).map((c) => c.name);
-  for (const [name, type] of [["uid", "TEXT"], ["held_dev", "TEXT"], ["held_ino", "TEXT"], ["purged_bytes", "INTEGER"], ["drop_refs", "TEXT"]]) {
+  for (const [name, type] of [["uid", "TEXT"], ["held_dev", "TEXT"], ["held_ino", "TEXT"], ["purged_bytes", "INTEGER"], ["drop_refs", "TEXT"], ["keep_dev", "TEXT"], ["keep_ino", "TEXT"], ["held_action", "TEXT"]]) {
     if (cols.includes(name)) continue;
     try {
       db.exec(`ALTER TABLE grabbit_dedupe_journal ADD COLUMN ${name} ${type}`);
@@ -176,6 +184,28 @@ function unlinkIfSame(abs: string, want: fs.Stats) {
     const st = fs.lstatSync(abs);
     if (st.dev === want.dev && st.ino === want.ino) fs.unlinkSync(abs);
   } catch { /* gone already, or left for a manual look */ }
+}
+
+// Removes the held name for a finished restore or purge. "removed" or "gone"
+// (ENOENT) means the name no longer holds `want`; "other" means another file
+// has the name now and was left alone. Every other error (EACCES, EIO, ...)
+// propagates: whether the name is gone is then unknown.
+function removeHeld(abs: string, want: fs.Stats): "removed" | "gone" | "other" {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(abs);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "gone";
+    throw e;
+  }
+  if (st.dev !== want.dev || st.ino !== want.ino) return "other";
+  try {
+    fs.unlinkSync(abs);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "gone";
+    throw e;
+  }
+  return "removed";
 }
 
 // Every directory from the channel root down to the destination's parent must
@@ -360,19 +390,26 @@ export async function link(ctx: Ctx, body: { keep?: unknown; drop?: unknown; sha
     // the link, and the rollback removes the stage only as this inode.
     let staged: fs.Stats | null = null;
     try {
-      const madeTrash = fs.mkdirSync(trashDir, { recursive: true }) !== undefined;
+      fs.mkdirSync(trashDir, { recursive: true });
       fs.linkSync(drop.abs, trashAbs); // the original stays reachable from the trash
       heldCreated = true;
-      // The held name (and the trash folder, if it is new) must be on disk
-      // before the clip's name is changed.
+      // The held name and the trash folder's own entry in the channel root
+      // must be on disk before the clip's name is changed. Both are synced on
+      // every attempt: a first attempt may have made the folder and failed
+      // before its parent was synced, and a retry finds it already there.
       syncDir(trashDir);
-      if (madeTrash) syncDir(drop.dir);
+      syncDir(drop.dir);
       // Restore and purge later accept only this inode at the held name.
       const held = identity(trashAbs);
       ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET held_dev = ?, held_ino = ? WHERE id = ?`).run(held.dev, held.ino, id);
       fs.linkSync(keep.abs, tmp);
       stageCreated = true;
       staged = fs.lstatSync(tmp);
+      // The inode the clip's name will hold after the rename, so a restore
+      // can recognise it even when the keeper post is later renamed or
+      // deleted. Written before the last checks (slow I/O stays before them).
+      const st = identity(tmp);
+      ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET keep_dev = ?, keep_ino = ? WHERE id = ?`).run(st.dev, st.ino, id);
       // The syncs and journal writes above are slow disk I/O. Every check
       // comes after them and the rename follows at once, with nothing slow in
       // between: the held name is the hashed drop, the staged name is the
@@ -441,6 +478,9 @@ interface JournalRow {
   held_ino: string | null;
   purged_bytes: number | null;
   drop_refs: string | null;
+  keep_dev: string | null;
+  keep_ino: string | null;
+  held_action: string | null;
 }
 
 // The post ids that used the dropped file when it was merged, or null for a
@@ -498,7 +538,16 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
   let held: fs.Stats;
   try {
     held = fs.lstatSync(trashAbs);
-  } catch {
+  } catch (e) {
+    // Only a name that is certainly absent is "missing". EACCES or EIO says
+    // nothing about it, so nothing is recorded.
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new DedupeError(`The held original cannot be checked (${(e as NodeJS.ErrnoException).code || (e as Error).message}); nothing changed`);
+    }
+    // A purge had started removing the held name: it is not coming back.
+    if (row.held_action === "purge") {
+      throw new DedupeError("A delete of this merge's held original was under way; nothing changed", 409, "Delete it again to finish the delete.");
+    }
     // A restore that put the original back and removed its held name, but
     // could not record that (a crash, a failed journal write), leaves the
     // clip's name on the held inode: finish recording it. Only a row with a
@@ -565,13 +614,23 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
     }
     cur = null;
   }
-  let keepIno: number | null = null;
-  try {
-    keepIno = fs.lstatSync(keep.abs).ino;
-  } catch {
-    keepIno = null;
+  // The inode the merge put at the clip's name: recorded at link time, or
+  // for an older row the keeper's current file.
+  let isMerged = false;
+  if (cur) {
+    if (row.keep_dev != null && row.keep_ino != null) {
+      const now = identity(drop.abs);
+      isMerged = now.dev === row.keep_dev && now.ino === row.keep_ino;
+    } else {
+      try {
+        const k = fs.lstatSync(keep.abs);
+        isMerged = k.dev === cur.dev && k.ino === cur.ino;
+      } catch {
+        isMerged = false;
+      }
+    }
   }
-  if (cur && cur.ino !== held.ino && cur.ino !== keepIno) {
+  if (cur && cur.ino !== held.ino && !isMerged) {
     throw new DedupeError(
       "The clip's file was replaced since the merge (re-transcoded or re-imported); restoring would overwrite the newer file",
       409,
@@ -644,10 +703,29 @@ export function restore(ctx: Ctx, id: unknown, uid: unknown) {
       return false;
     }
   };
+  // The intended action is on record before the held name goes, so a
+  // retry after a lost journal write finishes this restore and a purge
+  // cannot take the missing held name for a finished delete.
+  try {
+    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET held_action = 'restore' WHERE id = ?`).run(row.id);
+  } catch (e) {
+    throw mayHaveChanged(`TikShortis put the original back but could not record it (${(e as Error).message}); the held original is kept, try the restore again`, row.id, row.uid);
+  }
   if (!stillHeld()) {
     throw mayHaveChanged("The clip's file was replaced while it was being restored; the held original is kept", row.id, row.uid);
   }
-  unlinkIfSame(trashAbs, held); // an extra name of the restored file if it stays
+  // The held name is an extra name of the restored file now. It must be
+  // gone (or hold another file) before the row says restored; a failure to
+  // remove it keeps the row as it is, so a retry removes it.
+  try {
+    removeHeld(trashAbs, held);
+  } catch (e) {
+    throw mayHaveChanged(
+      `The original is back, but TikShortis could not remove its held copy (${(e as NodeJS.ErrnoException).code || (e as Error).message}); try the restore again`,
+      row.id,
+      row.uid
+    );
+  }
   try {
     ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
   } catch (e) {
@@ -662,6 +740,20 @@ export function purge(ctx: Ctx, id: unknown, uid: unknown) {
   const trashAbs = path.join(ctx.shortsRoot, row.channel, TRASH_DIR, row.trash_name as string);
   let bytes = 0;
   let unlinked = false;
+  // A restore had started removing the held name: the original is back in
+  // the clip, so a missing held name is no finished delete.
+  if (row.held_action === "restore") {
+    let present = true;
+    try {
+      fs.lstatSync(trashAbs);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      present = false;
+    }
+    if (!present) {
+      throw new DedupeError("A restore of this merge was under way, so its original is back in the clip; nothing changed", 409, "Restore it again to finish the restore.");
+    }
+  }
   try {
     const st = fs.lstatSync(trashAbs);
     if (!st.isFile()) throw new DedupeError("The held original is not a file");
@@ -669,6 +761,12 @@ export function purge(ctx: Ctx, id: unknown, uid: unknown) {
     // Freed only if no live name shares it (the clip's own name was replaced
     // by the link, so normally nlink is 1 here).
     bytes = st.nlink === 1 ? st.size : 0;
+    // On record before the held name goes (see restore).
+    try {
+      ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET held_action = 'purge' WHERE id = ?`).run(row.id);
+    } catch (e) {
+      throw new DedupeError(`TikShortis could not record the delete (${(e as Error).message}); nothing changed`, 422);
+    }
     fs.unlinkSync(trashAbs);
     unlinked = true;
   } catch (e) {
