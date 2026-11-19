@@ -112,12 +112,18 @@ function ensureJournal(db: Database.Database) {
 
 // fsync a directory so a rename or link in it is on disk before the journal
 // records the outcome.
+// Filesystems that cannot fsync a directory (some FUSE and network mounts
+// answer EINVAL or EPERM) are left as they are, as in Grabbit's fsyncDir().
+const NO_DIR_SYNC = new Set(["EINVAL", "EISDIR", "EPERM", "EBADF", "ENOTSUP", "EACCES"]);
 function syncDir(dir: string) {
-  const fd = fs.openSync(dir, "r");
+  let fd: number | null = null;
   try {
+    fd = fs.openSync(dir, "r");
     fs.fsyncSync(fd);
+  } catch (e) {
+    if (!NO_DIR_SYNC.has((e as NodeJS.ErrnoException).code || "")) throw e;
   } finally {
-    fs.closeSync(fd);
+    if (fd != null) fs.closeSync(fd);
   }
 }
 
