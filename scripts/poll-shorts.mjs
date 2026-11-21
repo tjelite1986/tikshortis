@@ -466,6 +466,10 @@ for (const profile of profiles) {
      VALUES (?, ?, NULL, ?, ?, NULL, 'video/mp4', 'poll', ?, 'pending')`
   );
 
+  const alreadyImported = db.prepare(
+    "SELECT 1 FROM shorts WHERE profile_id = ? AND source_id = ? LIMIT 1"
+  );
+
   const newSkips = [];
   for (const c of fresh) {
     const uuid = randomUUID();
@@ -484,6 +488,13 @@ for (const profile of profiles) {
       // storage_key is relative to the channel dir and includes the profile
       // subfolder, so the transcoder + media routes resolve it unchanged.
       const storageKey = `${slug}/${file}`;
+      // The download took a while: the web UI's import may have added the
+      // clip meanwhile. The file is this run's own (fresh uuid), so it goes.
+      if (alreadyImported.get(profile.id, String(c.id))) {
+        fs.rmSync(filePath, { force: true });
+        log(`  = ${c.id} was imported meanwhile — dropped this copy`);
+        continue;
+      }
       insert.run(profile.channel, profile.id, c.title, storageKey, String(c.id));
       clearFailure.run(profile.id, String(c.id));
       totalNew++;

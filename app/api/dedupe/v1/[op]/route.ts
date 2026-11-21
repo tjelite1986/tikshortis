@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { SHORTS_ROOT } from "@/lib/shorts-storage";
-import { DedupeError, link, lookup, opStatus, purge, restore, status, tokenOk, type Ctx } from "@/lib/grabbit-dedupe";
+import { DedupeError, hold, link, lookup, opStatus, purge, restore, status, tokenOk, type Ctx } from "@/lib/grabbit-dedupe";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 // every call needs X-Grabbit-Dedupe-Token; there is no session path.
 //   POST lookup  { paths: string[] }
 //   POST link    { keep, drop, sha256, op? }
+//   POST hold    { path, twin, sha256, op? }  (a file no clip uses)
 //   POST opstatus { op }
 //   POST restore { id, uid }
 //   POST purge   { id, uid }
@@ -64,6 +65,8 @@ export async function POST(request: Request, { params }: Params) {
         return NextResponse.json({ items: lookup(ctx(), body.paths) });
       case "link":
         return NextResponse.json(await link(ctx(), body));
+      case "hold":
+        return NextResponse.json(await hold(ctx(), body));
       case "opstatus":
         return NextResponse.json(await opStatus(ctx(), body.op));
       case "restore":
