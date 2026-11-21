@@ -15,7 +15,11 @@ import type Database from "better-sqlite3";
  *           kept one, so the bytes are stored once. The original extra file
  *           is held in .grabbit-dedupe-trash (same disk) until Grabbit's
  *           owner empties the trash; restore puts it back.
- *   restore Undo a link.
+ *   hold    A file no clip uses (an "orphan": left behind by an old double
+ *           import) whose bytes a live clip has too. The file, and its
+ *           poster frame if that is an orphan too, is moved into
+ *           .grabbit-dedupe-trash; restore puts it back. No clip changes.
+ *   restore Undo a link or a hold.
  *   purge   Delete a held original for good.
  *   lookup  Which posts use a file (for the review screen).
  *   opstatus What became of a link call whose answer Grabbit lost (by the
@@ -87,6 +91,8 @@ export interface Ctx {
   db: Database.Database;
   shortsRoot: string;
   now?: () => number;
+  /** How old a file must be before hold takes it (tests only; default HOLD_MIN_AGE_MS). */
+  holdMinAgeMs?: number;
 }
 
 function ensureJournal(db: Database.Database) {
@@ -110,7 +116,12 @@ function ensureJournal(db: Database.Database) {
     drop_refs TEXT,
     keep_dev TEXT,
     keep_ino TEXT,
-    held_action TEXT
+    held_action TEXT,
+    kind TEXT,
+    poster_key TEXT,
+    poster_trash TEXT,
+    poster_dev TEXT,
+    poster_ino TEXT
   )`);
   // Guarded ALTERs for journals created before these columns existed (same
   // pattern as lib/db.ts). Older rows keep uid NULL and can never be acted on
@@ -123,8 +134,12 @@ function ensureJournal(db: Database.Database) {
   // before the held name is removed, so a retry finishes that action and the
   // other one is refused. (The state CHECK cannot be altered in place, hence
   // a column rather than a new state.)
+  // kind is 'hold' for a held orphan (NULL = a link). A hold row uses the
+  // same states: 'linked' means held. Its keep_key is the twin (the live clip
+  // with the same bytes, which purge requires), drop_key the orphan, and
+  // poster_* the orphan poster frame held with it, if any.
   const cols = (db.prepare("PRAGMA table_info(grabbit_dedupe_journal)").all() as { name: string }[]).map((c) => c.name);
-  for (const [name, type] of [["uid", "TEXT"], ["held_dev", "TEXT"], ["held_ino", "TEXT"], ["purged_bytes", "INTEGER"], ["drop_refs", "TEXT"], ["keep_dev", "TEXT"], ["keep_ino", "TEXT"], ["held_action", "TEXT"]]) {
+  for (const [name, type] of [["uid", "TEXT"], ["held_dev", "TEXT"], ["held_ino", "TEXT"], ["purged_bytes", "INTEGER"], ["drop_refs", "TEXT"], ["keep_dev", "TEXT"], ["keep_ino", "TEXT"], ["held_action", "TEXT"], ["kind", "TEXT"], ["poster_key", "TEXT"], ["poster_trash", "TEXT"], ["poster_dev", "TEXT"], ["poster_ino", "TEXT"]]) {
     if (cols.includes(name)) continue;
     try {
       db.exec(`ALTER TABLE grabbit_dedupe_journal ADD COLUMN ${name} ${type}`);
@@ -401,20 +416,26 @@ function opKey(v: unknown): string | null {
 type LinkBody = { keep?: unknown; drop?: unknown; sha256?: unknown; op?: unknown };
 
 export async function link(ctx: Ctx, body: LinkBody) {
+  return withOp(ctx, body.op, (op) => linkFiles(ctx, body, op));
+}
+
+// Runs a link or hold under Grabbit's key `op` (if sent), so opstatus can
+// answer for it when the answer is lost.
+async function withOp<T>(ctx: Ctx, v: unknown, run: (op: string | null) => Promise<T>): Promise<T> {
   ensureJournal(ctx.db);
-  const op = opKey(body.op);
-  if (!op) return linkFiles(ctx, body, null);
+  const op = opKey(v);
+  if (!op) return run(null);
   // The key is claimed before anything else; a key seen before (a repeated
   // call, or one opstatus already closed) is refused and changes nothing.
   try {
     ctx.db.prepare("INSERT INTO grabbit_dedupe_ops (op, state) VALUES (?, 'started')").run(op);
   } catch (e) {
-    if (String(e).includes("UNIQUE")) throw new DedupeError("This merge request was already received or checked; nothing changed", 409);
+    if (String(e).includes("UNIQUE")) throw new DedupeError("This request was already received or checked; nothing changed", 409);
     throw e;
   }
   runningOps.add(op);
   try {
-    return await linkFiles(ctx, body, op);
+    return await run(op);
   } catch (e) {
     // Stopped before its journal row: nothing was changed. After it, the
     // journal row says what happened.
@@ -470,6 +491,7 @@ export async function opStatus(ctx: Ctx, v: unknown) {
 async function reconcileStopped(ctx: Ctx, id: number): Promise<string> {
   const row = ctx.db.prepare(`SELECT * FROM grabbit_dedupe_journal WHERE id = ?`).get(id) as JournalRow | undefined;
   if (!row || row.state !== "pending") return row ? row.state : "pending";
+  if (row.kind === "hold") return reconcileHold(ctx, row);
   try {
     const drop = parsePath(ctx, `${row.channel}/${row.drop_key}`);
     const trashAbs = row.trash_name && row.trash_name === path.basename(row.trash_name)
@@ -540,7 +562,7 @@ async function linkFiles(ctx: Ctx, body: LinkBody, op: string | null) {
   if (keep.abs === drop.abs) throw new DedupeError("Choose two different files");
   const keepRefs = refsOf(ctx.db, keep.channel, keep.key);
   const dropRefs = refsOf(ctx.db, drop.channel, drop.key);
-  if (!dropRefs.length) throw new DedupeError("No clip uses this file, so TikShortis does not merge it", 409, "Delete it in TikShortis' maintenance page if it is a leftover.");
+  if (!dropRefs.length) throw new DedupeError("No clip uses this file, so TikShortis does not merge it", 409, "If it is a leftover, hold it in TikShortis' dedupe trash from Grabbit instead.");
   if (!keepRefs.length) throw new DedupeError("No clip uses the file to keep; choose another to keep");
   if (new Set(dropRefs.map((r) => r.role)).size > 1 || dropRefs[0].role !== keepRefs[0].role) {
     throw new DedupeError("A video and a poster frame are never merged");
@@ -704,6 +726,11 @@ interface JournalRow {
   keep_dev: string | null;
   keep_ino: string | null;
   held_action: string | null;
+  kind: string | null;
+  poster_key: string | null;
+  poster_trash: string | null;
+  poster_dev: string | null;
+  poster_ino: string | null;
 }
 
 // The post ids that used the dropped file when it was merged, or null for a
@@ -754,6 +781,7 @@ function journal(ctx: Ctx, id: unknown, uid: unknown, op: "restore" | "purge"): 
 export function restore(ctx: Ctx, id: unknown, uid: unknown) {
   const row = journal(ctx, id, uid, "restore");
   if (row.replay) return { id: row.id, restored: `${row.channel}/${row.drop_key}` };
+  if (row.kind === "hold") return restoreHold(ctx, row);
   const dir = path.join(ctx.shortsRoot, row.channel);
   const trashAbs = path.join(dir, TRASH_DIR, row.trash_name as string);
   const drop = parsePath(ctx, `${row.channel}/${row.drop_key}`);
@@ -1070,6 +1098,20 @@ export async function purge(ctx: Ctx, id: unknown, uid: unknown) {
     if (e instanceof DedupeError) throw e;
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
+  // A hold's poster frame goes with it, without a survivor check: it is a
+  // frame made from the video, and the twin clip has its own. Only the inode
+  // the hold put there is removed.
+  if (row.kind === "hold") {
+    try {
+      const p = removeHeldPoster(ctx, row);
+      bytes += p.bytes;
+      if (p.removed) unlinked = true;
+    } catch (e) {
+      const msg = `TikShortis could not delete the held poster frame (${(e as NodeJS.ErrnoException).code || (e as Error).message}); try the purge again`;
+      if (unlinked) throw mayHaveChanged(msg, row.id, row.uid);
+      throw new DedupeError(msg, 422);
+    }
+  }
   // The removal must be on disk before the journal says purged: otherwise a
   // power loss could bring the held name back under a row that every retry
   // answers as done. Also on a retry that finds the name already gone.
@@ -1092,6 +1134,433 @@ export async function purge(ctx: Ctx, id: unknown, uid: unknown) {
     throw e;
   }
   return { id: row.id, bytes };
+}
+
+// ---------------------------------------------------------------------------
+// hold: a file no clip uses
+//
+// Grabbit finds files in this library whose bytes a live clip has too, but
+// which no clip names (old double imports left them behind). Such a file is
+// not a post, so a link would be wrong; it can only go. It goes the safe way:
+// into the dedupe trash under the same journal as a merge, restorable until
+// Grabbit's owner empties the trash, and purgeable only while the twin clip
+// still has the bytes.
+//
+// What makes a file "no clip's", checked before and again right before it
+// moves:
+// - no shorts row names it, deleted rows and both sections included (a
+//   deleted clip may be restored), as video or poster;
+// - no row names a file with the same base name: the transcoder writes
+//   <uuid>.web.mp4 and <uuid>.jpg before it points the row at them;
+// - no open journal row names it;
+// - it is older than HOLD_MIN_AGE_MS, by mtime, ctime and birth time: imports
+//   (downloadOne, uploads) write the file before they insert the row.
+// ---------------------------------------------------------------------------
+
+export const HOLD_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+
+// "alice/x.web.mp4" -> "alice/x" (".web.mp4" counts as one extension).
+function stemKey(key: string): string {
+  if (key.toLowerCase().endsWith(".web.mp4")) return key.slice(0, -".web.mp4".length);
+  const ext = path.posix.extname(key);
+  return ext ? key.slice(0, -ext.length) : key;
+}
+
+const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv)$/i;
+
+function likePrefix(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`) + "%";
+}
+
+// Why `key` is not an orphan, or null if it is one. Synchronous, so it can
+// run right before the move with nothing slow after it.
+function notOrphan(ctx: Ctx, channel: Channel, key: string, st: fs.Stats, minAge: number, selfId = 0): string | null {
+  // Every section: a key is relative to its section's folder, so a row in the
+  // other section names another file; refusing it too is the safe side.
+  if (ctx.db.prepare("SELECT 1 FROM shorts WHERE storage_key = ? OR poster_key = ? LIMIT 1").get(key, key)) {
+    return "A clip uses this file (a deleted clip counts too: it can be restored)";
+  }
+  const stem = stemKey(key).toLowerCase();
+  const like = likePrefix(stemKey(key));
+  const near = ctx.db
+    .prepare("SELECT storage_key, poster_key FROM shorts WHERE storage_key LIKE ? ESCAPE '\\' OR poster_key LIKE ? ESCAPE '\\'")
+    .all(like, like) as { storage_key: string | null; poster_key: string | null }[];
+  if (near.some((r) => [r.storage_key, r.poster_key].some((k) => k != null && stemKey(k).toLowerCase() === stem))) {
+    return "A clip uses a file with the same name (the transcoder may be about to point it at this one)";
+  }
+  if (
+    ctx.db
+      .prepare("SELECT 1 FROM grabbit_dedupe_journal WHERE channel = ? AND id != ? AND state IN ('pending', 'linked') AND (keep_key = ? OR drop_key = ? OR poster_key = ?) LIMIT 1")
+      .get(channel, selfId, key, key, key)
+  ) {
+    return "Another Grabbit merge or hold still names this file";
+  }
+  const now = ctx.now ? ctx.now() : Date.now();
+  const born = Math.max(st.mtimeMs, st.ctimeMs, st.birthtimeMs || 0);
+  if (now - born < minAge) {
+    return "The file is too new to be a leftover (an import may still be writing its clip)";
+  }
+  return null;
+}
+
+function sameFile(a: fs.Stats | null, b: fs.Stats): boolean {
+  return !!a && a.isFile() && a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+}
+
+function lstatOrNull(abs: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(abs);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+}
+
+// Moves the live name `abs` to the fresh trash name `heldAbs` (a random name
+// no one else knows, so the rename clobbers nothing), then judges what was
+// moved. Anything other than `want` goes back with a no-clobber link.
+// "held": `want` is at heldAbs. "back": something else was there and went
+// back. "stuck": something else was moved and could not go back (it stays at
+// heldAbs; the row must stay restorable).
+function moveToHeld(abs: string, heldAbs: string, want: fs.Stats): "held" | "back" | "stuck" {
+  fs.renameSync(abs, heldAbs);
+  let got: fs.Stats | null = null;
+  try { got = fs.lstatSync(heldAbs); } catch { got = null; }
+  if (sameFile(got, want)) return "held";
+  putBack(heldAbs, abs);
+  return lstatOrNull(heldAbs) ? "stuck" : "back";
+}
+
+type HoldBody = { path?: unknown; twin?: unknown; sha256?: unknown; op?: unknown };
+
+export async function hold(ctx: Ctx, body: HoldBody) {
+  return withOp(ctx, body.op, (op) => holdFile(ctx, body, op));
+}
+
+async function holdFile(ctx: Ctx, body: HoldBody, op: string | null) {
+  const file = parsePath(ctx, body.path);
+  const twin = parsePath(ctx, body.twin);
+  const sha = typeof body.sha256 === "string" && /^[0-9a-f]{64}$/.test(body.sha256) ? body.sha256 : null;
+  if (!sha) throw new DedupeError("sha256 is required", 400);
+  if (twin.channel !== file.channel) throw new DedupeError("The file and its twin are in different sections (main and 18+)");
+  if (twin.abs === file.abs) throw new DedupeError("Choose two different files");
+  const minAge = ctx.holdMinAgeMs ?? HOLD_MIN_AGE_MS;
+  // The twin keeps the bytes: purge later deletes the held file only while
+  // a clip still has them, so the twin must be a live clip's file.
+  const twinRefs = refsOf(ctx.db, twin.channel, twin.key);
+  if (!twinRefs.length) throw new DedupeError("No clip uses the twin file, so this file may be the last copy; nothing changed");
+  if (busy) throw new DedupeError("Another merge is running; try again in a moment");
+  busy = true;
+  try {
+    const fs0 = regular(file.abs, file.dir);
+    const ts = regular(twin.abs, twin.dir);
+    const why = notOrphan(ctx, file.channel, file.key, fs0, minAge);
+    if (why) throw new DedupeError(`${why}; nothing changed`);
+    if (fs0.size !== ts.size) throw new DedupeError("The files are not identical any more; scan again");
+    const [a, b] = await Promise.all([sha256Of(file.abs), sha256Of(twin.abs)]);
+    if (a !== sha || b !== sha) throw new DedupeError("The bytes no longer match what Grabbit saw; scan again");
+    if (!sameFile(lstatOrNull(file.abs), fs0) || !sameFile(lstatOrNull(twin.abs), ts)) {
+      throw new DedupeError("A file changed while it was checked; try again");
+    }
+    if (!refsOf(ctx.db, twin.channel, twin.key).length) throw new DedupeError("The twin clip changed while it was checked; scan again");
+    // The poster frame beside a video (<stem>.jpg) goes with it when it is
+    // an orphan too. A poster that is not stays where it is.
+    let poster: { key: string; abs: string; st: fs.Stats } | null = null;
+    if (VIDEO_EXT.test(file.key)) {
+      const pkey = `${stemKey(file.key)}.jpg`;
+      try {
+        const p = parsePath(ctx, `${file.channel}/${pkey}`);
+        const ps = regular(p.abs, p.dir);
+        if (!notOrphan(ctx, file.channel, pkey, ps, minAge)) poster = { key: pkey, abs: p.abs, st: ps };
+      } catch { poster = null; }
+    }
+    const uid = crypto.randomBytes(16).toString("hex");
+    const held = identity(file.abs);
+    const id = ctx.db.transaction(() => {
+      const jid = Number(
+        ctx.db
+          .prepare(
+            `INSERT INTO grabbit_dedupe_journal (channel, keep_key, drop_key, role, sha256, bytes, state, uid, drop_refs, kind, held_dev, held_ino, poster_key)
+             VALUES (?, ?, ?, 'orphan', ?, ?, 'pending', ?, '[]', 'hold', ?, ?, ?)`
+          )
+          .run(file.channel, twin.key, file.key, sha, fs0.size, uid, held.dev, held.ino, poster ? poster.key : null).lastInsertRowid
+      );
+      if (op && ctx.db.prepare("UPDATE grabbit_dedupe_ops SET journal_id = ? WHERE op = ? AND state = 'started'").run(jid, op).changes !== 1) {
+        throw new DedupeError("This request was closed meanwhile; nothing changed", 409);
+      }
+      return jid;
+    })();
+    const trashDir = path.join(file.dir, TRASH_DIR);
+    const trashName = `${id}-${crypto.randomBytes(4).toString("hex")}-${path.basename(file.key).slice(0, 150)}`;
+    const trashAbs = path.join(trashDir, trashName);
+    // On record before any file moves, so an interrupted hold can be
+    // restored or purged.
+    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET trash_name = ? WHERE id = ?`).run(trashName, id);
+    const failRow = (e: unknown) => {
+      try {
+        ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'failed', error = ?, done_at = datetime('now') WHERE id = ? AND state = 'pending'`).run(String((e as Error).message).slice(0, 300), id);
+      } catch { /* stays pending: restore and opstatus still work */ }
+    };
+    let moved: "held" | "back" | "stuck" | null = null;
+    try {
+      fs.mkdirSync(trashDir, { recursive: true });
+      syncDir(trashDir);
+      syncDir(file.dir);
+      // The last checks, with nothing slow between them and the rename.
+      const why2 = notOrphan(ctx, file.channel, file.key, fs0, minAge, id);
+      if (why2) throw new DedupeError(`${why2}; nothing changed`);
+      const nowId = identity(file.abs);
+      if (!sameFile(lstatOrNull(file.abs), fs0) || nowId.dev !== held.dev || nowId.ino !== held.ino) {
+        throw new DedupeError("The file changed while the hold was prepared; nothing changed");
+      }
+      moved = moveToHeld(file.abs, trashAbs, fs0);
+    } catch (e) {
+      // A rename that happened but could not be judged: the moved file, if
+      // any, is at the recorded trash name, so the row stays pending and
+      // restorable. A trash name that cannot be checked counts as present.
+      let atTrash = true;
+      try { atTrash = !!lstatOrNull(trashAbs); } catch { atTrash = true; }
+      if (moved === null && atTrash) {
+        throw mayHaveChanged(`TikShortis could not finish the hold (${(e as NodeJS.ErrnoException).code || (e as Error).message}); hold ${id} is pending and can be restored`, id, uid);
+      }
+      failRow(e);
+      if (e instanceof DedupeError) throw e;
+      throw new DedupeError(`TikShortis could not hold the file (${(e as NodeJS.ErrnoException).code || (e as Error).message}); nothing changed`);
+    }
+    if (moved === "back") {
+      const e = new DedupeError("The file changed while the hold was prepared; nothing changed");
+      failRow(e);
+      throw e;
+    }
+    if (moved === "stuck") {
+      throw mayHaveChanged(`Another file took this name while it was held; it stays in TikShortis' dedupe trash as hold ${id} and can be restored`, id, uid);
+    }
+    // The video is held. Its poster follows; a poster that changed meanwhile
+    // stays where it is (it is not this hold's any more).
+    let posterHeld = false;
+    if (poster) {
+      const pName = `${id}-${crypto.randomBytes(4).toString("hex")}-${path.basename(poster.key).slice(0, 150)}`;
+      const pAbs = path.join(trashDir, pName);
+      try {
+        const pid = identity(poster.abs);
+        ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET poster_trash = ?, poster_dev = ?, poster_ino = ? WHERE id = ?`).run(pName, pid.dev, pid.ino, id);
+        if (!notOrphan(ctx, file.channel, poster.key, poster.st, minAge, id) && sameFile(lstatOrNull(poster.abs), poster.st)) {
+          const pm = moveToHeld(poster.abs, pAbs, poster.st);
+          posterHeld = pm === "held";
+          if (pm === "stuck") console.error(`[grabbit-dedupe] hold ${id}: another file took ${poster.key} while it was held; it stays at ${pAbs}`);
+        }
+      } catch (e) {
+        console.error(`[grabbit-dedupe] hold ${id}: the poster frame stays where it is (${(e as NodeJS.ErrnoException).code || (e as Error).message})`);
+      }
+      if (!posterHeld && !lstatOrNull(pAbs)) {
+        try {
+          ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET poster_key = NULL, poster_trash = NULL, poster_dev = NULL, poster_ino = NULL WHERE id = ?`).run(id);
+        } catch { /* restore and purge find no held poster and skip it */ }
+      }
+    }
+    let durable = true;
+    try {
+      syncDir(trashDir);
+      syncDir(path.dirname(file.abs));
+    } catch (e) {
+      durable = false;
+      console.error(`[grabbit-dedupe] hold ${id}: a folder could not be synced (${(e as NodeJS.ErrnoException).code || (e as Error).message})`);
+    }
+    try {
+      ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'linked', error = ?, done_at = datetime('now') WHERE id = ?`).run(durable ? null : "folder sync failed", id);
+    } catch (e) {
+      throw mayHaveChanged(`TikShortis held the file but could not record it (${(e as Error).message}); hold ${id} is pending and can be restored`, id, uid);
+    }
+    return {
+      id,
+      uid,
+      bytes: fs0.size,
+      posts: [] as number[],
+      held: `${file.channel}/${file.key}`,
+      poster: posterHeld && poster ? `${file.channel}/${poster.key}` : null,
+      durable,
+    };
+  } finally {
+    busy = false;
+  }
+}
+
+// The held poster frame of a hold row, if the row has one.
+function heldPoster(ctx: Ctx, row: JournalRow): { abs: string; key: string } | null {
+  if (row.kind !== "hold" || !row.poster_trash || !row.poster_key || row.poster_trash !== path.basename(row.poster_trash)) return null;
+  return { abs: path.join(ctx.shortsRoot, row.channel, TRASH_DIR, row.poster_trash), key: row.poster_key };
+}
+
+function posterIdentityOk(row: JournalRow, abs: string): boolean {
+  if (row.poster_dev == null || row.poster_ino == null) return false;
+  const now = identity(abs);
+  return now.dev === row.poster_dev && now.ino === row.poster_ino;
+}
+
+// Purge: removes the held poster if it is still the inode the hold put
+// there. Returns the bytes freed and whether a name was removed.
+function removeHeldPoster(ctx: Ctx, row: JournalRow): { bytes: number; removed: boolean } {
+  const hp = heldPoster(ctx, row);
+  if (!hp) return { bytes: 0, removed: false };
+  const st = lstatOrNull(hp.abs);
+  if (!st || !st.isFile() || !posterIdentityOk(row, hp.abs)) return { bytes: 0, removed: false };
+  const bytes = st.nlink === 1 ? st.size : 0;
+  return removeHeld(hp.abs, st) === "removed" ? { bytes, removed: true } : { bytes: 0, removed: false };
+}
+
+// Puts a held file back at its name: a no-clobber link, refused when another
+// file has the name or a clip names it (a clip without its file would get
+// bytes that are not its own). "back" if the name holds the held inode now.
+function putHeldBack(ctx: Ctx, channel: Channel, key: string, heldAbs: string, held: fs.Stats): "back" | "taken" {
+  const dir = path.join(ctx.shortsRoot, channel);
+  const t = parsePath(ctx, `${channel}/${key}`);
+  const cur = lstatOrNull(t.abs);
+  if (cur) return cur.dev === held.dev && cur.ino === held.ino ? "back" : "taken";
+  if (ctx.db.prepare("SELECT 1 FROM shorts WHERE storage_key = ? OR poster_key = ? LIMIT 1").get(key, key)) return "taken";
+  checkParents(dir, t.abs, true);
+  fs.mkdirSync(path.dirname(t.abs), { recursive: true });
+  checkParents(dir, t.abs, false);
+  try {
+    fs.linkSync(heldAbs, t.abs);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return "taken";
+    throw e;
+  }
+  const now = lstatOrNull(t.abs);
+  return now && now.dev === held.dev && now.ino === held.ino ? "back" : "taken";
+}
+
+function restoreHold(ctx: Ctx, row: JournalRow) {
+  const dir = path.join(ctx.shortsRoot, row.channel);
+  const file = parsePath(ctx, `${row.channel}/${row.drop_key}`);
+  const trashAbs = path.join(dir, TRASH_DIR, row.trash_name as string);
+  const answer = (poster: string | null) => ({ id: row.id, restored: `${row.channel}/${row.drop_key}`, poster });
+  let held: fs.Stats | null;
+  try {
+    held = lstatOrNull(trashAbs);
+  } catch (e) {
+    throw new DedupeError(`The held file cannot be checked (${(e as NodeJS.ErrnoException).code || (e as Error).message}); nothing changed`);
+  }
+  if (!held) {
+    if (row.held_action === "purge") {
+      throw new DedupeError("A delete of this held file was under way; nothing changed", 409, "Delete it again to finish the delete.");
+    }
+    // A restore that put the file back and removed its held name but could
+    // not record it: the name holds the held inode.
+    let back = false;
+    try {
+      const now = identity(file.abs);
+      back = row.held_dev != null && now.dev === row.held_dev && now.ino === row.held_ino;
+    } catch { back = false; }
+    if (!back) throw new DedupeError("The held file is missing");
+    try {
+      ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
+    } catch (e) {
+      throw mayHaveChanged(`The file is back but TikShortis could not record it (${(e as Error).message}); try the restore again`, row.id, row.uid);
+    }
+    return answer(null);
+  }
+  if (!held.isFile()) throw new DedupeError("The held file is not a file");
+  // Whatever is at the held name came from the file's name (the trash name
+  // is random and on record before the move), so it is what goes back, also
+  // when a pending hold moved a writer's file there.
+  const r = putHeldBack(ctx, row.channel, row.drop_key, trashAbs, held);
+  if (r === "taken") {
+    throw new DedupeError(
+      "Another file or a clip uses this name now; restoring would overwrite or stand in for it, so nothing changed",
+      409,
+      "Delete the held file instead, or restore it by hand."
+    );
+  }
+  // The poster frame goes back when it can; a poster name taken meanwhile
+  // leaves the held poster for the purge.
+  const hp = heldPoster(ctx, row);
+  let posterBack: { abs: string; st: fs.Stats; key: string } | null = null;
+  if (hp) {
+    try {
+      const pst = lstatOrNull(hp.abs);
+      if (pst && pst.isFile() && putHeldBack(ctx, row.channel, hp.key, hp.abs, pst) === "back") posterBack = { abs: hp.abs, st: pst, key: hp.key };
+    } catch (e) {
+      console.error(`[grabbit-dedupe] hold ${row.id}: the poster frame stays held (${(e as NodeJS.ErrnoException).code || (e as Error).message})`);
+    }
+  }
+  try {
+    syncUp(path.dirname(file.abs), dir);
+  } catch (e) {
+    throw mayHaveChanged(
+      `TikShortis put the file back but could not confirm it on disk (${(e as NodeJS.ErrnoException).code || (e as Error).message}); the held file is kept, try the restore again`,
+      row.id,
+      row.uid
+    );
+  }
+  try {
+    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET held_action = 'restore' WHERE id = ?`).run(row.id);
+  } catch (e) {
+    throw mayHaveChanged(`TikShortis put the file back but could not record it (${(e as Error).message}); the held file is kept, try the restore again`, row.id, row.uid);
+  }
+  // The held name is a second name of the restored file now. It goes only
+  // while the file's name still holds it (removeHeld checks the held name).
+  const still = lstatOrNull(file.abs);
+  if (!still || still.dev !== held.dev || still.ino !== held.ino) {
+    throw mayHaveChanged("The file was replaced while it was being restored; the held file is kept", row.id, row.uid);
+  }
+  try {
+    removeHeld(trashAbs, held);
+    if (posterBack) {
+      const pNow = lstatOrNull(path.join(dir, posterBack.key));
+      if (pNow && pNow.dev === posterBack.st.dev && pNow.ino === posterBack.st.ino) removeHeld(posterBack.abs, posterBack.st);
+    }
+  } catch (e) {
+    throw mayHaveChanged(
+      `The file is back, but TikShortis could not remove its held copy (${(e as NodeJS.ErrnoException).code || (e as Error).message}); try the restore again`,
+      row.id,
+      row.uid
+    );
+  }
+  try {
+    ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = 'restored', done_at = datetime('now') WHERE id = ?`).run(row.id);
+  } catch (e) {
+    throw mayHaveChanged(`The file is back but TikShortis could not record it (${(e as Error).message}); try the restore again`, row.id, row.uid);
+  }
+  return answer(posterBack ? `${row.channel}/${posterBack.key}` : null);
+}
+
+// A pending hold whose call is not running any more:
+// - no held name and the file's name still holds the recorded inode: the
+//   move never happened -> 'failed';
+// - the held name holds the recorded inode with the journaled bytes and the
+//   file's name is free: the hold finished but was not recorded -> 'linked';
+// - anything else stays 'pending' (restore still works on it).
+async function reconcileHold(ctx: Ctx, row: JournalRow): Promise<string> {
+  try {
+    const file = parsePath(ctx, `${row.channel}/${row.drop_key}`);
+    const trashAbs = row.trash_name && row.trash_name === path.basename(row.trash_name)
+      ? path.join(ctx.shortsRoot, row.channel, TRASH_DIR, row.trash_name)
+      : null;
+    const d = lstatOrNull(file.abs);
+    const h = trashAbs ? lstatOrNull(trashAbs) : null;
+    const isHeldInode = (abs: string) => {
+      const n = identity(abs);
+      return row.held_dev != null && n.dev === row.held_dev && n.ino === row.held_ino;
+    };
+    const set = (state: "failed" | "linked", why: string) => {
+      ctx.db.prepare(`UPDATE grabbit_dedupe_journal SET state = ?, error = ?, done_at = datetime('now') WHERE id = ? AND state = 'pending'`).run(state, why, row.id);
+      return state;
+    };
+    if (!h) {
+      if (d && d.isFile() && isHeldInode(file.abs) && !heldPoster(ctx, row)) return set("failed", "stopped before the file moved");
+      return "pending";
+    }
+    if (d || !h.isFile() || !isHeldInode(trashAbs as string)) return "pending";
+    const hh = await sha256Of(trashAbs as string);
+    if (hh !== row.sha256 || busy) return "pending";
+    const cur = ctx.db.prepare(`SELECT state FROM grabbit_dedupe_journal WHERE id = ?`).get(row.id) as { state: string } | undefined;
+    if (!cur || cur.state !== "pending") return cur ? cur.state : "pending";
+    if (!sameFile(lstatOrNull(trashAbs as string), h) || lstatOrNull(file.abs)) return "pending";
+    return set("linked", "finished before a stop, recorded later");
+  } catch {
+    return "pending";
+  }
 }
 
 export function status(ctx: Ctx) {

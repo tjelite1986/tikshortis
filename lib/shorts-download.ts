@@ -187,23 +187,48 @@ export async function enumerateCandidates(
 // Download a single clip into the profile's folder and insert a 'pending' short
 // (the transcoder turns it into .web.mp4). Returns the new short id, or null on
 // failure / if it already exists.
+// Downloads running in this process, by profile and source id. Two requests
+// for the same clip at once (a double click, two tabs) would otherwise both
+// pass the "already imported" check, both download, and both insert a row,
+// leaving the same video twice in the library.
+const inFlight = new Set<string>();
+
+function alreadyImported(profileId: number, sourceId: string): boolean {
+  return Boolean(
+    getOne(
+      qb
+        .selectFrom("shorts")
+        .select("id")
+        .where("profile_id", "=", profileId)
+        .where("source_id", "=", sourceId)
+    )
+  );
+}
+
 export async function downloadOne(
   profile: ShortProfileRow,
   videoUrl: string,
   sourceId: string,
   title: string | null
 ): Promise<number | null> {
-  if (
-    getOne(
-      qb
-        .selectFrom("shorts")
-        .select("id")
-        .where("profile_id", "=", profile.id)
-        .where("source_id", "=", sourceId)
-    )
-  ) {
-    return null; // already imported
+  const key = `${profile.id}:${sourceId}`;
+  if (inFlight.has(key) || alreadyImported(profile.id, sourceId)) {
+    return null; // already imported, or being imported right now
   }
+  inFlight.add(key);
+  try {
+    return await downloadNew(profile, videoUrl, sourceId, title);
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
+async function downloadNew(
+  profile: ShortProfileRow,
+  videoUrl: string,
+  sourceId: string,
+  title: string | null
+): Promise<number | null> {
 
   const slug = profileSlug(profile.name);
   const dir = path.join(channelDir(profile.channel), slug);
@@ -240,6 +265,14 @@ export async function downloadOne(
   if (!(await hasVideoStream(path.join(dir, produced[0])))) {
     for (const f of produced) fs.rmSync(path.join(dir, f), { force: true });
     throw new Error("This post is a photo/slideshow — it has no video.");
+  }
+
+  // The download took minutes: another importer (the poll script runs in its
+  // own process) may have added the clip meanwhile. The files just made are
+  // this call's own (a fresh uuid), so they go.
+  if (alreadyImported(profile.id, sourceId)) {
+    for (const f of produced) fs.rmSync(path.join(dir, f), { force: true });
+    return null;
   }
 
   const result = db
